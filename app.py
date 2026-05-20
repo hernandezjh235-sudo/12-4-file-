@@ -20,7 +20,7 @@ import streamlit as st
 from math import exp, factorial
 from datetime import datetime, timedelta
 
-APP_VERSION = "v11.17 K PROJ UPSIDE TAB + HARD GATE FIX — EDGE UI + SOFT OFFENSE PRESSURE"
+APP_VERSION = "v11.17 K PROJ UPSIDE TAB + HARD GATE FIX — EDGE UI"
 
 try:
     import pytz
@@ -136,25 +136,6 @@ HIGH_RECENT_RUNS_AVG = 4.5
 HIGH_SEASON_HR9 = 1.35
 HIGH_SEASON_BB9 = 3.8
 HIGH_SEASON_H9 = 9.5
-
-# =========================
-# v11.18 SAFE OFFENSE PRESSURE LAYER
-# =========================
-# Lightweight opponent offense pressure. This does NOT change raw pitcher K skill.
-# It only nudges expected batters faced/leash VERY lightly when the opposing offense
-# has strong OPS/OBP/SLG/run pressure. This is intentionally soft so good K reads
-# do not get over-suppressed into PASS.
-OFFENSE_PRESSURE_ENABLED_DEFAULT = True
-OFFENSE_PRESSURE_BF_MIN = 0.985
-OFFENSE_PRESSURE_BF_MAX = 1.005
-OFFENSE_PRESSURE_STRONG_OPS = 0.760
-OFFENSE_PRESSURE_GOOD_OPS = 0.735
-OFFENSE_PRESSURE_STRONG_OBP = 0.330
-OFFENSE_PRESSURE_GOOD_OBP = 0.320
-OFFENSE_PRESSURE_STRONG_SLG = 0.430
-OFFENSE_PRESSURE_GOOD_SLG = 0.410
-OFFENSE_PRESSURE_STRONG_RPG = 5.00
-OFFENSE_PRESSURE_GOOD_RPG = 4.70
 
 # =========================
 # v11.6 REPEAT MATCHUP FAMILIARITY SETTINGS
@@ -2322,165 +2303,6 @@ def pitcher_run_damage_profile(pitcher_id, recent_rows=None, statcast_profile=No
     profile["notes"] = profile["notes"][:10]
     return profile
 
-
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def team_offense_pressure_profile(team_id):
-    """Opponent offense pressure for K props.
-
-    Uses MLB team season hitting stats only when available. This layer is
-    intentionally small and leash-focused: strong OPS/OBP/SLG/RPG can reduce
-    expected BF a little because traffic and long innings can shorten a start.
-    It does not change the pitcher's raw K%, batter K%, Statcast, calibration,
-    or line matching.
-    """
-    profile = {
-        "available": False,
-        "ops": None,
-        "obp": None,
-        "slg": None,
-        "avg": None,
-        "runs_per_game": None,
-        "hits_per_game": None,
-        "score": 0,
-        "label": "UNKNOWN",
-        "bf_factor": 1.0,
-        "notes": []
-    }
-    if not team_id:
-        profile["notes"].append("Opponent offense pressure unavailable: no team id")
-        return profile
-
-    def add(points, note):
-        profile["score"] += int(points)
-        if note:
-            profile["notes"].append(str(note))
-
-    try:
-        data = safe_get_json(
-            f"{MLB_BASE}/teams/{team_id}/stats",
-            params={"stats": "season", "group": "hitting"},
-            timeout=12,
-        )
-        split = get_first_stat_split(data)
-        stat = (split or {}).get("stat", {}) if split else {}
-        if not stat:
-            profile["notes"].append("Opponent offense pressure unavailable: no team stats")
-            return profile
-
-        ops = safe_float(stat.get("ops"))
-        obp = safe_float(stat.get("obp"))
-        slg = safe_float(stat.get("slg"))
-        avg = safe_float(stat.get("avg"))
-        runs = safe_float(stat.get("runs"), 0) or 0
-        hits = safe_float(stat.get("hits"), 0) or 0
-        games = safe_float(stat.get("gamesPlayed"), 0) or 0
-
-        profile["ops"] = ops
-        profile["obp"] = obp
-        profile["slg"] = slg
-        profile["avg"] = avg
-        if games > 0:
-            profile["runs_per_game"] = float(runs / games)
-            profile["hits_per_game"] = float(hits / games)
-        if any(v is not None for v in [ops, obp, slg, avg, profile.get("runs_per_game")]):
-            profile["available"] = True
-
-        if ops is not None:
-            if ops >= OFFENSE_PRESSURE_STRONG_OPS:
-                add(3, f"Strong opponent OPS {ops:.3f}")
-            elif ops >= OFFENSE_PRESSURE_GOOD_OPS:
-                add(2, f"Good opponent OPS {ops:.3f}")
-            elif ops <= 0.675:
-                add(-1, f"Weak opponent OPS {ops:.3f}")
-
-        if obp is not None:
-            if obp >= OFFENSE_PRESSURE_STRONG_OBP:
-                add(2, f"High opponent OBP {obp:.3f}")
-            elif obp >= OFFENSE_PRESSURE_GOOD_OBP:
-                add(1, f"Good opponent OBP {obp:.3f}")
-            elif obp <= 0.295:
-                add(-1, f"Low opponent OBP {obp:.3f}")
-
-        if slg is not None:
-            if slg >= OFFENSE_PRESSURE_STRONG_SLG:
-                add(2, f"High opponent SLG {slg:.3f}")
-            elif slg >= OFFENSE_PRESSURE_GOOD_SLG:
-                add(1, f"Good opponent SLG {slg:.3f}")
-            elif slg <= 0.370:
-                add(-1, f"Low opponent SLG {slg:.3f}")
-
-        rpg = profile.get("runs_per_game")
-        if rpg is not None:
-            if rpg >= OFFENSE_PRESSURE_STRONG_RPG:
-                add(2, f"High opponent RPG {rpg:.1f}")
-            elif rpg >= OFFENSE_PRESSURE_GOOD_RPG:
-                add(1, f"Good opponent RPG {rpg:.1f}")
-            elif rpg <= 4.0:
-                add(-1, f"Low opponent RPG {rpg:.1f}")
-
-        score = int(profile.get("score", 0) or 0)
-        if not profile["available"]:
-            profile["label"] = "UNKNOWN"
-            profile["bf_factor"] = 1.0
-        elif score >= 7:
-            profile["label"] = "EXTREME_PRESSURE"
-            profile["bf_factor"] = 0.995
-        elif score >= 5:
-            profile["label"] = "HIGH_PRESSURE"
-            profile["bf_factor"] = 0.990
-        elif score >= 3:
-            profile["label"] = "MILD_PRESSURE"
-            profile["bf_factor"] = 0.985
-        elif score <= -3:
-            profile["label"] = "LOW_PRESSURE"
-            profile["bf_factor"] = 1.005
-        else:
-            profile["label"] = "NEUTRAL"
-            profile["bf_factor"] = 1.0
-
-        profile["bf_factor"] = float(clamp(profile["bf_factor"], OFFENSE_PRESSURE_BF_MIN, OFFENSE_PRESSURE_BF_MAX))
-        if not profile["notes"]:
-            profile["notes"].append("Opponent offense pressure neutral")
-    except Exception as e:
-        profile["notes"].append(f"Opponent offense pressure unavailable: {e}")
-
-    profile["notes"] = profile["notes"][:8]
-    return profile
-
-
-def apply_offense_pressure_bf_factor(expected_bf, pressure_profile, enabled=True):
-    """Apply a capped offense-pressure BF nudge.
-
-    Safe design: this only touches expected BF, and only by a very small capped amount.
-    Missing data is neutral.
-    """
-    bf = safe_float(expected_bf)
-    if bf is None:
-        return expected_bf, "Offense pressure skipped: no expected BF"
-    if not enabled:
-        return bf, "Offense pressure disabled"
-    if not isinstance(pressure_profile, dict) or not pressure_profile.get("available"):
-        note = " | ".join((pressure_profile or {}).get("notes", [])[:3]) if isinstance(pressure_profile, dict) else "unavailable"
-        return bf, f"Offense pressure neutral: {note}"
-    factor = safe_float(pressure_profile.get("bf_factor"), 1.0) or 1.0
-    factor = float(clamp(factor, OFFENSE_PRESSURE_BF_MIN, OFFENSE_PRESSURE_BF_MAX))
-    new_bf = float(clamp(bf * factor, 12, 31))
-    label = pressure_profile.get("label", "UNKNOWN")
-    stats = []
-    if pressure_profile.get("ops") is not None:
-        stats.append(f"OPS {pressure_profile.get('ops'):.3f}")
-    if pressure_profile.get("obp") is not None:
-        stats.append(f"OBP {pressure_profile.get('obp'):.3f}")
-    if pressure_profile.get("slg") is not None:
-        stats.append(f"SLG {pressure_profile.get('slg'):.3f}")
-    if pressure_profile.get("runs_per_game") is not None:
-        stats.append(f"R/G {pressure_profile.get('runs_per_game'):.1f}")
-    note = f"Offense pressure {label} x{factor:.3f}"
-    if stats:
-        note += " (" + ", ".join(stats[:4]) + ")"
-    return new_bf, note
 
 
 def opponent_contact_damage_profile(batter_pitch_rows=None):
@@ -4663,24 +4485,6 @@ def make_projection(row, bankroll, default_odds, use_statcast, use_pitch_type, u
         game_script_risk = {"label": "UNKNOWN", "factor": 1.0, "score": 0, "notes": f"Game-script risk skipped: {_gs_e}"}
         game_script_note = game_script_risk.get("notes")
 
-    # v11.18 offense pressure layer. Applied after run-damage and before
-    # manager-hook/bullpen. It only nudges BF slightly; raw K skill is untouched.
-    try:
-        offense_pressure_profile = team_offense_pressure_profile(row.get("opp_team_id"))
-        pressured_bf, offense_pressure_note = apply_offense_pressure_bf_factor(
-            leash.get("expected_bf"), offense_pressure_profile, enabled=OFFENSE_PRESSURE_ENABLED_DEFAULT
-        )
-        leash["expected_bf"] = pressured_bf
-        leash["offense_pressure_label"] = offense_pressure_profile.get("label", "UNKNOWN")
-        leash["offense_pressure_bf_factor"] = offense_pressure_profile.get("bf_factor", 1.0)
-        leash["offense_pressure_note"] = offense_pressure_note
-    except Exception as _off_e:
-        offense_pressure_profile = {"available": False, "label": "UNKNOWN", "bf_factor": 1.0, "notes": [str(_off_e)]}
-        offense_pressure_note = f"Offense pressure skipped: {_off_e}"
-        leash["offense_pressure_label"] = "UNKNOWN"
-        leash["offense_pressure_bf_factor"] = 1.0
-        leash["offense_pressure_note"] = offense_pressure_note
-
     # v11.9 manager hook / TTTO volume upgrade. Applied after base leash and
     # game-script risk, before bullpen factor, so final BF still respects bullpen context.
     try:
@@ -5020,8 +4824,6 @@ def make_projection(row, bankroll, default_odds, use_statcast, use_pitch_type, u
         risk_notes = (risk_notes + "; " if risk_notes else "") + true_probability_calibration.get("note")
     if isinstance(game_script_risk, dict) and game_script_risk.get("label") in ["MILD", "HIGH", "EXTREME"]:
         risk_notes = (risk_notes + "; " if risk_notes else "") + "Run Damage Engine: " + str(game_script_note)
-    if isinstance(locals().get("offense_pressure_profile"), dict) and offense_pressure_profile.get("label") in ["MILD_PRESSURE", "HIGH_PRESSURE", "EXTREME_PRESSURE"]:
-        risk_notes = (risk_notes + "; " if risk_notes else "") + "Offense Pressure: " + str(offense_pressure_note)
     if final_decision_note:
         risk_notes = (risk_notes + "; " if risk_notes else "") + "Final Decision: " + str(final_decision_note)
 
@@ -5059,9 +4861,6 @@ def make_projection(row, bankroll, default_odds, use_statcast, use_pitch_type, u
             rr["Bullpen Fatigue Note"] = bullpen_note
             rr["Game Script Risk"] = game_script_risk.get("label", "UNKNOWN") if "game_script_risk" in locals() else "UNKNOWN"
             rr["Game Script Note"] = game_script_note if "game_script_note" in locals() else ""
-            rr["Opponent Offense Pressure"] = offense_pressure_profile.get("label", "UNKNOWN") if "offense_pressure_profile" in locals() else "UNKNOWN"
-            rr["Opponent Offense BF Factor"] = round(safe_float(offense_pressure_profile.get("bf_factor"), 1.0), 3) if "offense_pressure_profile" in locals() else 1.0
-            rr["Opponent Offense Note"] = offense_pressure_note if "offense_pressure_note" in locals() else ""
             rr["Manager Hook"] = leash.get("manager_hook_status")
             rr["Manager Hook Note"] = leash.get("manager_hook_note")
             rr["Repeat Matchup"] = repeat_matchup_profile.get("label", "NEUTRAL") if "repeat_matchup_profile" in locals() else "NEUTRAL"
@@ -5151,10 +4950,6 @@ def make_projection(row, bankroll, default_odds, use_statcast, use_pitch_type, u
         "repeat_matchup_note": repeat_matchup_note if "repeat_matchup_note" in locals() else repeat_matchup_profile.get("note", ""),
         "pitcher_damage_profile": pitcher_damage_profile,
         "opponent_damage_profile": opponent_damage_profile,
-        "opponent_offense_pressure_profile": offense_pressure_profile if "offense_pressure_profile" in locals() else {"label": "UNKNOWN", "bf_factor": 1.0},
-        "opponent_offense_pressure_label": offense_pressure_profile.get("label", "UNKNOWN") if "offense_pressure_profile" in locals() else "UNKNOWN",
-        "opponent_offense_bf_factor": round(safe_float(offense_pressure_profile.get("bf_factor"), 1.0), 3) if "offense_pressure_profile" in locals() else 1.0,
-        "opponent_offense_note": offense_pressure_note if "offense_pressure_note" in locals() else "",
         "bullpen_recent_games": bullpen_usage.get("games") if isinstance(bullpen_usage, dict) else None,
         "bullpen_recent_ip": bullpen_usage.get("bullpen_ip") if isinstance(bullpen_usage, dict) else None,
         "bullpen_recent_pitches": bullpen_usage.get("bullpen_pitches") if isinstance(bullpen_usage, dict) else None,
