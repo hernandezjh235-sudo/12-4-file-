@@ -20,8 +20,9 @@ import pandas as pd
 import streamlit as st
 from math import exp, factorial
 from datetime import datetime, timedelta
+from pathlib import Path
 
-APP_VERSION = "v11.17 K PROJ UPSIDE + FANTASY SCORE + ML"
+APP_VERSION = "v11.17 V3 SUPPRESSION OFF TEST"
 
 try:
     import pytz
@@ -19717,6 +19718,85 @@ except Exception:
     pass
 
 
+
+# =========================
+# V3 PITCH.CSV LOG-FEED FIX
+# Version: V3_PITCH_LOG_FEED_FIX_2026_06_15
+# Purpose: force V3 modules to use learning_data/Pitch.csv directly when session logs are empty.
+# =========================
+V3_PITCH_LOG_FEED_FIX_VERSION = "V3_PITCH_LOG_FEED_FIX_2026_06_15"
+
+def _v3_learning_data_candidates(filename="Pitch.csv"):
+    try:
+        return [
+            Path("learning_data") / filename,
+            Path.cwd() / "learning_data" / filename,
+            Path(__file__).resolve().parent / "learning_data" / filename,
+            Path(filename),
+        ]
+    except Exception:
+        return [Path("learning_data") / filename, Path(filename)]
+
+def _v3_force_load_pitch_csv():
+    """Guaranteed Pitch.csv loader for V3 season/line-aware modules."""
+    try:
+        cached = st.session_state.get("_v3_pitch_csv_cache")
+        if isinstance(cached, pd.DataFrame) and not cached.empty:
+            return cached.copy()
+    except Exception:
+        pass
+    try:
+        for p in _v3_learning_data_candidates("Pitch.csv"):
+            try:
+                if p.exists():
+                    df = pd.read_csv(p)
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        for c in ["K", "Ks", "SO", "IP", "IP_float", "BF", "Pitch Count", "Pitches", "ER", "HR", "BB", "WHIP"]:
+                            if c in df.columns:
+                                df[c] = pd.to_numeric(df[c], errors="coerce")
+                        if "Date" in df.columns:
+                            df["_date"] = pd.to_datetime(df["Date"], errors="coerce")
+                        st.session_state["_v3_pitch_csv_cache"] = df.copy()
+                        st.session_state["pitcher_season_logs"] = df.copy()
+                        st.session_state["pitcher_30_day_logs"] = df.copy()
+                        return df.copy()
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+def _v3_get_pitcher_log_source():
+    """Session logs first, embedded Pitch.csv fallback second."""
+    try:
+        for key in ["pitcher_season_logs", "pitcher_30_day_logs"]:
+            df = st.session_state.get(key)
+            if isinstance(df, pd.DataFrame) and not df.empty and "Pitcher" in df.columns:
+                return df.copy()
+    except Exception:
+        pass
+    return _v3_force_load_pitch_csv()
+
+# Warm-load Pitch.csv immediately so V3 has Opening Day logs after deploy/restart.
+try:
+    _v3_force_load_pitch_csv()
+except Exception:
+    pass
+
+def render_v3_pitch_log_feed_fix_panel():
+    st.markdown("### 🧪 V3 Pitch.csv Log Feed Fix")
+    try:
+        df = _v3_force_load_pitch_csv()
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            st.success(f"V3 Pitch.csv log feed active: {len(df)} rows")
+            show_cols = [c for c in ["Date", "Pitcher", "Team", "Opponent", "IP", "BF", "Pitch Count", "K"] if c in df.columns]
+            if show_cols:
+                st.dataframe(df[show_cols].tail(10), use_container_width=True, hide_index=True)
+        else:
+            st.error("V3 Pitch.csv log feed not active. Make sure learning_data/Pitch.csv is next to app.py.")
+    except Exception as e:
+        st.error(f"V3 Pitch.csv log feed check failed: {e}")
+
 # =========================
 # SEASON LOG PROJECTION BRIDGE
 # Version: SEASON_LOG_PROJECTION_BRIDGE_2026_06_12
@@ -19760,6 +19840,10 @@ def _slpb_split_matchup(matchup):
 
 def _slpb_pitcher_logs():
     try:
+        if "_v3_get_pitcher_log_source" in globals():
+            df = _v3_get_pitcher_log_source()
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                return df.copy()
         for key in ["pitcher_season_logs", "pitcher_30_day_logs"]:
             df = st.session_state.get(key)
             if isinstance(df, pd.DataFrame) and not df.empty:
@@ -20378,7 +20462,8 @@ def render_final_k_projection_connector_panel():
 # Trims aggressive K projections only when far above season/opponent anchors.
 # Conservative capped tax; designed to reduce inflated overs without killing true ceilings.
 # =========================
-PROJECTION_INFLATION_SUPPRESSION_VERSION = "PROJECTION_INFLATION_SUPPRESSION_2_0_2026_06_12"
+PROJECTION_INFLATION_SUPPRESSION_VERSION = "PROJECTION_INFLATION_SUPPRESSION_DISABLED_TEST_2026_06_15"
+SUPPRESSION_OFFICIAL_APPLY_ENABLED = False
 
 def _pis_num(x, default=None):
     try:
@@ -20513,7 +20598,7 @@ def _pis_apply(df):
     d["Inflation Suppression Version"] = PROJECTION_INFLATION_SUPPRESSION_VERSION
 
     try:
-        if bool(st.session_state.get("use_inflation_suppressed_k_projection", True)):
+        if SUPPRESSION_OFFICIAL_APPLY_ENABLED and bool(st.session_state.get("use_inflation_suppressed_k_projection", False)):
             if "K PROJ" in d.columns:
                 d["Pre-Suppression K PROJ"] = d["K PROJ"]
                 d["K PROJ"] = d["Suppressed Final K Projection"]
@@ -20542,13 +20627,13 @@ if "build_kproj_table" in globals():
             return df
 
 def render_projection_inflation_suppression_panel():
-    st.markdown("### 🧯 Projection Inflation Suppression 2.0")
-    st.caption("Test layer: trims aggressive K projections only when far above season/opponent anchors.")
+    st.markdown("### 🧯 Projection Inflation Suppression 2.0 — OFFICIAL APPLY DISABLED TEST")
+    st.caption("Suppression preview remains visible, but it is NOT applied to official K PROJ/Decision in this V3 test.")
     try:
         st.session_state["use_inflation_suppressed_k_projection"] = st.toggle(
-            "Use Inflation-Suppressed K Projection",
-            value=st.session_state.get("use_inflation_suppressed_k_projection", True),
-            help="ON = K PROJ/Decision use suppressed final projection. OFF = preview only.",
+            "Preview Inflation-Suppressed K Projection only",
+            value=st.session_state.get("use_inflation_suppressed_k_projection", False),
+            help="This V3 test keeps suppression as preview only. Official K PROJ is not overwritten by suppression.",
             key="use_inflation_suppressed_k_projection_unique"
         )
     except Exception:
@@ -20889,7 +20974,7 @@ def _lahr_line(row):
 
 def _lahr_pitcher_logs_for(player):
     try:
-        df = st.session_state.get("pitcher_season_logs")
+        df = _v3_get_pitcher_log_source() if "_v3_get_pitcher_log_source" in globals() else st.session_state.get("pitcher_season_logs")
         if not isinstance(df, pd.DataFrame) or df.empty:
             df = st.session_state.get("pitcher_30_day_logs")
         if not isinstance(df, pd.DataFrame) or df.empty or "Pitcher" not in df.columns:
@@ -20899,9 +20984,14 @@ def _lahr_pitcher_logs_for(player):
         d = d[d["_p_norm"] == _lahr_norm_name(player)].copy()
         if d.empty:
             return pd.DataFrame()
-        for c in ["K", "IP", "BF", "Pitch Count", "ER", "HR", "BB", "WHIP"]:
+        for c in ["K", "Ks", "SO", "IP", "IP_float", "BF", "Pitch Count", "Pitches", "ER", "HR", "BB", "WHIP"]:
             if c in d.columns:
                 d[c] = pd.to_numeric(d[c], errors="coerce")
+        if "K" not in d.columns:
+            for alt in ["Ks", "SO"]:
+                if alt in d.columns:
+                    d["K"] = pd.to_numeric(d[alt], errors="coerce")
+                    break
         if "Date" in d.columns:
             d["_date"] = pd.to_datetime(d["Date"], errors="coerce")
             d = d.sort_values("_date")
