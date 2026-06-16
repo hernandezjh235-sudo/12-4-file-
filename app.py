@@ -20,9 +20,20 @@ import pandas as pd
 import streamlit as st
 from math import exp, factorial
 from datetime import datetime, timedelta
-from pathlib import Path
 
-APP_VERSION = "v11.17 V3 SUPPRESSION OFF TEST"
+APP_VERSION = "v11.17 K PROJ UPSIDE + FANTASY SCORE + ML"
+
+# =========================
+# V3 TEST PATCH — 40% SUPPRESSION + IP ACCURACY TEST
+# =========================
+V3_TEST_PATCH_VERSION = "V3_40_SUPPRESSION_IP_TEST_RESEARCH_HUB_2026_06_15"
+# 0.40 means the old suppression effect is only applied at 40% strength.
+# Keeps upside alive while reducing over-reactions from suppression fully OFF.
+V3_PARTIAL_SUPPRESSION_STRENGTH = 0.40
+# IP test is intentionally small and capped so it cannot wreck the engine.
+V3_IP_ACCURACY_TEST_ENABLED = True
+V3_IP_ACCURACY_MAX_ADJ = 0.45
+
 
 try:
     import pytz
@@ -1482,6 +1493,97 @@ def build_pitch_count_module(recent_rows):
     }
 
 
+
+def v3_role_stability_from_ip(ip_vals, pitch_count_profile=None, manager_hook_status=None):
+    """V3 IP-test helper. Uses recent real IP + role/leash labels to create a small stability score.
+    This is used only inside the V3 test file and is capped before affecting projected IP.
+    """
+    vals = [float(x) for x in (ip_vals or []) if x is not None]
+    l5 = vals[:5]
+    score = 50
+    notes = []
+    if not l5:
+        score -= 12; notes.append("no recent IP")
+    else:
+        starter_like = sum(1 for x in l5 if x >= 4.0)
+        deep = sum(1 for x in l5 if x >= 5.0)
+        avg = sum(l5) / len(l5)
+        if starter_like >= 4:
+            score += 18; notes.append("starter workload")
+        elif starter_like <= 2:
+            score -= 18; notes.append("short/swing workload")
+        if deep >= 3:
+            score += 8; notes.append("recent 5+ IP")
+        if len(l5) >= 3 and (max(l5) - min(l5)) >= 2.5:
+            score -= 14; notes.append("volatile leash")
+        if avg >= 5.8:
+            score += 6; notes.append("strong L5 IP")
+        elif avg <= 4.2:
+            score -= 8; notes.append("weak L5 IP")
+    pc_label = str((pitch_count_profile or {}).get("label") or "").upper()
+    hook = str(manager_hook_status or "").upper()
+    if pc_label in ["FULL_LEASH", "ELITE_VOLUME"]:
+        score += 8; notes.append(f"pitch count {pc_label}")
+    elif pc_label in ["SHORT_LEASH", "MONITOR"]:
+        score -= 8; notes.append(f"pitch count {pc_label}")
+    if hook == "STRICT_HOOK":
+        score -= 10; notes.append("strict manager hook")
+    score = int(clamp(score, 0, 100))
+    label = "STABLE_STARTER" if score >= 78 else "MOSTLY_STABLE" if score >= 63 else "ROLE_WATCH" if score >= 48 else "HIGH_ROLE_RISK"
+    return score, label, "; ".join(notes[:5]) if notes else "normal role profile"
+
+
+def v3_ip_accuracy_adjustment(projected_ip, ip_from_bf, recent_l3_ip, recent_l5_ip, recent_l10_ip, pitch_count_profile=None, manager_hook_status=None, game_script_risk=None):
+    """Small V3 test nudge to get innings closer without letting IP swing wildly.
+    Max move is V3_IP_ACCURACY_MAX_ADJ, default 0.45 innings.
+    """
+    if not globals().get("V3_IP_ACCURACY_TEST_ENABLED", True):
+        return float(projected_ip), 0.0, "IP test OFF", 50, "OFF"
+    base = safe_float(projected_ip, None)
+    if base is None:
+        return projected_ip, 0.0, "No base IP", 50, "UNKNOWN"
+    adj = 0.0
+    notes = []
+    vals = []
+    for v in [recent_l3_ip, recent_l5_ip, recent_l10_ip]:
+        n = safe_float(v, None)
+        if n is not None:
+            vals.append(n)
+    role_score, role_label, role_note = v3_role_stability_from_ip(vals, pitch_count_profile=pitch_count_profile, manager_hook_status=manager_hook_status)
+    if recent_l5_ip is not None:
+        diff = float(recent_l5_ip) - float(base)
+        if diff >= 0.85:
+            adj += 0.24; notes.append("recent IP above projection")
+        elif diff <= -0.85:
+            adj -= 0.24; notes.append("recent IP below projection")
+        if recent_l3_ip is not None:
+            l3diff = float(recent_l3_ip) - float(recent_l5_ip)
+            if l3diff >= 0.55:
+                adj += 0.12; notes.append("L3 leash rising")
+            elif l3diff <= -0.55:
+                adj -= 0.12; notes.append("L3 leash falling")
+    pc_label = str((pitch_count_profile or {}).get("label") or "").upper()
+    if pc_label in ["ELITE_VOLUME", "FULL_LEASH"]:
+        adj += 0.10; notes.append(f"{pc_label} support")
+    elif pc_label in ["SHORT_LEASH", "MONITOR"]:
+        adj -= 0.12; notes.append(f"{pc_label} tax")
+    hook = str(manager_hook_status or "").upper()
+    if hook == "STRICT_HOOK":
+        adj -= 0.15; notes.append("strict hook tax")
+    gs_label = str((game_script_risk or {}).get("label") or "").upper() if isinstance(game_script_risk, dict) else ""
+    if gs_label in ["HIGH", "EXTREME"]:
+        adj -= 0.10; notes.append("game-script pull risk")
+    # role score acts as a tiny guardrail, not a full projection engine.
+    if role_score >= 78:
+        adj += 0.08
+    elif role_score < 48:
+        adj -= 0.12
+    cap = safe_float(globals().get("V3_IP_ACCURACY_MAX_ADJ", 0.45), 0.45) or 0.45
+    adj = float(clamp(adj, -cap, cap))
+    new_ip = float(clamp(base + adj, 3.0, 7.6))
+    note = f"V3 IP test {adj:+.2f}: " + ("; ".join(notes[:5]) if notes else "neutral") + f" | role {role_label} {role_score}/100"
+    return new_ip, round(adj, 2), note, role_score, role_label
+
 def build_innings_outcome_module(recent_rows, expected_bf, ppb=None, pitch_count_profile=None, manager_hook_status=None, game_script_risk=None):
     """Project starter innings outcome and early-pull risk from real recent IP/BF/pitch-count data."""
     rows = list(recent_rows or [])
@@ -1522,6 +1624,16 @@ def build_innings_outcome_module(recent_rows, expected_bf, ppb=None, pitch_count
         risk_points += 20; reasons.append("manager hook strict")
     if gs_label in ["HIGH", "EXTREME"]:
         risk_points += 12; reasons.append(f"game script {gs_label}")
+    # V3 test: small capped IP nudge from recent IP trend + role stability + leash context.
+    try:
+        projected_ip, v3_ip_adj, v3_ip_note, v3_role_score, v3_role_label = v3_ip_accuracy_adjustment(
+            projected_ip, ip_from_bf, recent_l3_ip, recent_l5_ip, recent_l10_ip,
+            pitch_count_profile=pitch_count_profile,
+            manager_hook_status=manager_hook_status,
+            game_script_risk=game_script_risk,
+        )
+    except Exception as _v3ip_e:
+        v3_ip_adj, v3_ip_note, v3_role_score, v3_role_label = 0.0, f"V3 IP test skipped: {_v3ip_e}", 50, "UNKNOWN"
     risk_score = int(clamp(50 + risk_points, 5, 95))
     if risk_score >= 78:
         label = "EARLY_PULL_HIGH"
@@ -1549,7 +1661,11 @@ def build_innings_outcome_module(recent_rows, expected_bf, ppb=None, pitch_count
         "projected_pitches": round(projected_pitches, 0) if projected_pitches is not None else None,
         "early_pull_risk_score": risk_score,
         "early_pull_label": label,
-        "note": f"Innings outcome {label}: IP {projected_ip:.1f} range {low_ip:.1f}-{high_ip:.1f}; " + "; ".join(note_bits),
+        "v3_ip_test_adjustment": v3_ip_adj if 'v3_ip_adj' in locals() else 0.0,
+        "v3_ip_test_note": v3_ip_note if 'v3_ip_note' in locals() else "V3 IP test unavailable",
+        "v3_role_stability_score": v3_role_score if 'v3_role_score' in locals() else 50,
+        "v3_role_stability_label": v3_role_label if 'v3_role_label' in locals() else "UNKNOWN",
+        "note": f"Innings outcome {label}: IP {projected_ip:.1f} range {low_ip:.1f}-{high_ip:.1f}; " + "; ".join(note_bits) + (" | " + (v3_ip_note if 'v3_ip_note' in locals() else "")),
     }
 
 def tto_decay_factor(pa_index):
@@ -7904,6 +8020,10 @@ def make_projection(row, bankroll, default_odds, use_statcast, use_pitch_type, u
         "projected_ip": innings_outcome.get("projected_ip"),
         "ip_floor": innings_outcome.get("ip_floor"),
         "ip_ceiling": innings_outcome.get("ip_ceiling"),
+        "v3_ip_test_adjustment": innings_outcome.get("v3_ip_test_adjustment"),
+        "v3_ip_test_note": innings_outcome.get("v3_ip_test_note"),
+        "v3_role_stability_score": innings_outcome.get("v3_role_stability_score"),
+        "v3_role_stability_label": innings_outcome.get("v3_role_stability_label"),
         "recent_ip_l3": innings_outcome.get("recent_ip_l3"),
         "recent_ip_l5": innings_outcome.get("recent_ip_l5"),
         "recent_ip_l10": innings_outcome.get("recent_ip_l10"),
@@ -8361,6 +8481,35 @@ def grade_finished_games():
     save_json(PICK_LOG, picks[-10000:])
     save_json(RESULT_LOG, results[-10000:])
     return graded
+
+
+def grade_finished_games_with_diagnostics():
+    """
+    Same grading flow as grade_finished_games(), but returns useful counts
+    so the UI does not just show 0 with no explanation.
+    """
+    before_picks = load_json(PICK_LOG, [])
+    before_results = load_json(RESULT_LOG, [])
+
+    total_saved = len(before_picks)
+    already_graded = sum(1 for p in before_picks if p.get("graded"))
+    missing_ids = sum(1 for p in before_picks if not p.get("game_pk") or not p.get("pitcher_id"))
+    ungraded = [p for p in before_picks if not p.get("graded")]
+
+    graded = grade_finished_games()
+
+    after_results = load_json(RESULT_LOG, [])
+    return {
+        "graded": graded,
+        "saved_snapshots": total_saved,
+        "ungraded_before": len(ungraded),
+        "already_graded_before": already_graded,
+        "missing_game_or_pitcher_id": missing_ids,
+        "results_before": len(before_results),
+        "results_after": len(after_results),
+        "pick_log_path": PICK_LOG,
+        "result_log_path": RESULT_LOG,
+    }
 
 def build_signal_tracking():
     results = load_json(RESULT_LOG, [])
@@ -9448,6 +9597,19 @@ def kproj_upside_projection(p):
         if ceiling_risk >= KPROJ_CEILING_RISK_WARN_UNDER or historical_k9 >= 9.0 or recent_max >= 7:
             proj = max(proj, talent_base * KPROJ_TOTAL_SUPPRESSION_CAP, recent_form_proj * 0.88)
 
+    # V3 test: restore only 40% of suppression so suppression is not fully OFF.
+    try:
+        proj, v3_partial_supp_adj, v3_partial_supp_note = v3_apply_partial_suppression_restore(
+            proj, original_proj, talent_base, recent_form_proj, p
+        )
+        if isinstance(p, dict):
+            p["v3_partial_suppression_adjustment"] = v3_partial_supp_adj
+            p["v3_partial_suppression_note"] = v3_partial_supp_note
+            p["v3_partial_suppression_strength"] = V3_PARTIAL_SUPPRESSION_STRENGTH
+    except Exception as _v3supp_e:
+        if isinstance(p, dict):
+            p["v3_partial_suppression_note"] = f"partial suppression error: {_v3supp_e}"
+
     return round(float(clamp(proj, 0.0, 15.0)), 2)
 
 # =========================
@@ -9479,6 +9641,39 @@ KPROJ_TOTAL_SUPPRESSION_CAP = 0.92  # K PROJ should not fall far below true-tale
 KPROJ_TRUE_TALENT_BLEND_WEIGHT = 0.72
 KPROJ_MAX_NEGATIVE_SUPPRESSION_STARTER = 0.88
 KPROJ_MIN_UNDER_EDGE_NO_CEILING = 2.00
+
+
+def v3_apply_partial_suppression_restore(proj, original_proj, talent_base, recent_form_proj, p):
+    """V3 test only: restore 40% of the suppression guard instead of leaving suppression fully OFF.
+    It only pulls projections toward the conservative reference when V3 is meaningfully above it.
+    It does not boost low projections.
+    """
+    try:
+        strength = safe_float(globals().get("V3_PARTIAL_SUPPRESSION_STRENGTH", 0.40), 0.40) or 0.40
+        strength = float(clamp(strength, 0.0, 1.0))
+        current = safe_float(proj, None)
+        if current is None:
+            return proj, 0.0, "partial suppression unavailable"
+        original = safe_float(original_proj, current) or current
+        talent = safe_float(talent_base, current) or current
+        recent = safe_float(recent_form_proj, current) or current
+        pk = safe_float((p or {}).get("pitcher_k"), LEAGUE_AVG_K) or LEAGUE_AVG_K
+        confirmed = kproj_is_confirmed_starter_like(p or {})
+        # Conservative reference: more skeptical for low/unstable arms, lighter for proven K arms.
+        if confirmed and pk >= 0.265:
+            ref = (original * 0.45) + (talent * 0.30) + (recent * 0.25)
+        else:
+            ref = (original * 0.58) + (talent * 0.27) + (recent * 0.15)
+        # Only pull down when the upside blend is materially above the conservative reference.
+        excess = current - ref
+        if excess <= 0.18:
+            return current, 0.0, "partial suppression neutral"
+        max_pull = 0.70 if pk < 0.235 else 0.55 if pk < 0.265 else 0.40
+        pull = min(excess * strength, max_pull)
+        out = current - pull
+        return float(out), round(-pull, 2), f"40% partial suppression pull {pull:.2f} vs conservative ref {ref:.2f}"
+    except Exception as e:
+        return proj, 0.0, f"partial suppression skipped: {e}"
 
 
 def kproj_recent_ceiling_stats(p):
@@ -19718,85 +19913,6 @@ except Exception:
     pass
 
 
-
-# =========================
-# V3 PITCH.CSV LOG-FEED FIX
-# Version: V3_PITCH_LOG_FEED_FIX_2026_06_15
-# Purpose: force V3 modules to use learning_data/Pitch.csv directly when session logs are empty.
-# =========================
-V3_PITCH_LOG_FEED_FIX_VERSION = "V3_PITCH_LOG_FEED_FIX_2026_06_15"
-
-def _v3_learning_data_candidates(filename="Pitch.csv"):
-    try:
-        return [
-            Path("learning_data") / filename,
-            Path.cwd() / "learning_data" / filename,
-            Path(__file__).resolve().parent / "learning_data" / filename,
-            Path(filename),
-        ]
-    except Exception:
-        return [Path("learning_data") / filename, Path(filename)]
-
-def _v3_force_load_pitch_csv():
-    """Guaranteed Pitch.csv loader for V3 season/line-aware modules."""
-    try:
-        cached = st.session_state.get("_v3_pitch_csv_cache")
-        if isinstance(cached, pd.DataFrame) and not cached.empty:
-            return cached.copy()
-    except Exception:
-        pass
-    try:
-        for p in _v3_learning_data_candidates("Pitch.csv"):
-            try:
-                if p.exists():
-                    df = pd.read_csv(p)
-                    if isinstance(df, pd.DataFrame) and not df.empty:
-                        for c in ["K", "Ks", "SO", "IP", "IP_float", "BF", "Pitch Count", "Pitches", "ER", "HR", "BB", "WHIP"]:
-                            if c in df.columns:
-                                df[c] = pd.to_numeric(df[c], errors="coerce")
-                        if "Date" in df.columns:
-                            df["_date"] = pd.to_datetime(df["Date"], errors="coerce")
-                        st.session_state["_v3_pitch_csv_cache"] = df.copy()
-                        st.session_state["pitcher_season_logs"] = df.copy()
-                        st.session_state["pitcher_30_day_logs"] = df.copy()
-                        return df.copy()
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return pd.DataFrame()
-
-def _v3_get_pitcher_log_source():
-    """Session logs first, embedded Pitch.csv fallback second."""
-    try:
-        for key in ["pitcher_season_logs", "pitcher_30_day_logs"]:
-            df = st.session_state.get(key)
-            if isinstance(df, pd.DataFrame) and not df.empty and "Pitcher" in df.columns:
-                return df.copy()
-    except Exception:
-        pass
-    return _v3_force_load_pitch_csv()
-
-# Warm-load Pitch.csv immediately so V3 has Opening Day logs after deploy/restart.
-try:
-    _v3_force_load_pitch_csv()
-except Exception:
-    pass
-
-def render_v3_pitch_log_feed_fix_panel():
-    st.markdown("### 🧪 V3 Pitch.csv Log Feed Fix")
-    try:
-        df = _v3_force_load_pitch_csv()
-        if isinstance(df, pd.DataFrame) and not df.empty:
-            st.success(f"V3 Pitch.csv log feed active: {len(df)} rows")
-            show_cols = [c for c in ["Date", "Pitcher", "Team", "Opponent", "IP", "BF", "Pitch Count", "K"] if c in df.columns]
-            if show_cols:
-                st.dataframe(df[show_cols].tail(10), use_container_width=True, hide_index=True)
-        else:
-            st.error("V3 Pitch.csv log feed not active. Make sure learning_data/Pitch.csv is next to app.py.")
-    except Exception as e:
-        st.error(f"V3 Pitch.csv log feed check failed: {e}")
-
 # =========================
 # SEASON LOG PROJECTION BRIDGE
 # Version: SEASON_LOG_PROJECTION_BRIDGE_2026_06_12
@@ -19840,10 +19956,6 @@ def _slpb_split_matchup(matchup):
 
 def _slpb_pitcher_logs():
     try:
-        if "_v3_get_pitcher_log_source" in globals():
-            df = _v3_get_pitcher_log_source()
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                return df.copy()
         for key in ["pitcher_season_logs", "pitcher_30_day_logs"]:
             df = st.session_state.get(key)
             if isinstance(df, pd.DataFrame) and not df.empty:
@@ -20455,19 +20567,16 @@ def render_final_k_projection_connector_panel():
 
 
 # =========================
-# PROJECTION INFLATION SUPPRESSION 2.0
-# Version: PROJECTION_INFLATION_SUPPRESSION_2_0_2026_06_12
-#
-# Separate test layer for K Upside only.
-# Trims aggressive K projections only when far above season/opponent anchors.
-# Conservative capped tax; designed to reduce inflated overs without killing true ceilings.
+# TRUE PROJECTION CALIBRATION TEST
+# Version: TRUE_PROJECTION_CALIBRATION_TEST_2026_06_14
+# Uses: season logs, current-line hit rate, opponent/matchup hit rate,
+# volume reality, soft ceiling clamp, and thin-edge PASS filter.
 # =========================
-PROJECTION_INFLATION_SUPPRESSION_VERSION = "PROJECTION_INFLATION_SUPPRESSION_DISABLED_TEST_2026_06_15"
-SUPPRESSION_OFFICIAL_APPLY_ENABLED = False
+TRUE_PROJECTION_CALIBRATION_TEST_VERSION = "TRUE_PROJECTION_CALIBRATION_TEST_2026_06_14"
 
-def _pis_num(x, default=None):
+def _tpc_num(x, default=None):
     try:
-        if x in (None, "", "—", "WAITING_FOR_UD_LINE"):
+        if x in (None, "", "—", "WAITING_FOR_UD_LINE", "NL"):
             return default
         v = float(x)
         if pd.isna(v):
@@ -20476,488 +20585,13 @@ def _pis_num(x, default=None):
     except Exception:
         return default
 
-def _pis_cap(x, lo, hi):
+def _tpc_cap(x, lo, hi):
     try:
         return max(lo, min(hi, float(x)))
     except Exception:
         return 0.0
 
-def _pis_calc(row):
-    final_proj = _pis_num(row.get("Final K Projection"), None)
-    if final_proj is None:
-        final_proj = _pis_num(row.get("K PROJ"), None)
-    if final_proj is None:
-        return 0.0, "NO_PROJ", ""
-
-    season_avg = _pis_num(row.get("Season Avg K"), None)
-    season_med = _pis_num(row.get("Season Median K"), season_avg)
-    recent3 = _pis_num(row.get("Season Recent3 K"), season_avg)
-    opp_avg = _pis_num(row.get("Opp Hist Avg K"), None)
-    starts = _pis_num(row.get("Season Starts"), 0)
-    opp_starts = _pis_num(row.get("Opp Hist Starts"), 0)
-    line = _pis_num(row.get("UD/Line"), None)
-
-    if starts < 3 or season_avg is None:
-        return 0.0, "NO_SUPPRESSION_LOW_SAMPLE", ""
-
-    anchors = [x for x in [season_avg, season_med, recent3] if x is not None]
-    if opp_avg is not None and opp_starts >= 1:
-        anchors.append(opp_avg)
-    if not anchors:
-        return 0.0, "NO_SUPPRESSION_NO_ANCHOR", ""
-
-    anchor = sum(anchors) / len(anchors)
-    over_anchor = final_proj - anchor
-
-    if over_anchor < 0.75:
-        return 0.0, "NO_SUPPRESSION_NORMAL_RANGE", f"final {final_proj:.2f} vs anchor {anchor:.2f}"
-
-    ace_protect = bool(season_avg >= 6.5 and recent3 is not None and recent3 >= 6.0)
-
-    tax = 0.0
-    tax -= _pis_cap((over_anchor - 0.50) * 0.18, 0.00, 0.45)
-
-    if line is not None and (final_proj - line) >= 1.75:
-        tax -= 0.08
-
-    whip = _pis_num(row.get("Season WHIP"), None)
-    er = _pis_num(row.get("Season Avg ER"), None)
-    bb = _pis_num(row.get("Season Avg BB"), None)
-    hr = _pis_num(row.get("Season Avg HR"), None)
-
-    if whip is not None and whip >= 1.45:
-        tax -= 0.06
-    if er is not None and er >= 3.50:
-        tax -= 0.06
-    if bb is not None and bb >= 3.00:
-        tax -= 0.04
-    if hr is not None and hr >= 1.20:
-        tax -= 0.04
-
-    tax = max(tax, -0.22 if ace_protect else -0.60)
-    tax = round(tax, 2)
-
-    if tax <= -0.40:
-        label = "SUPPRESS_STRONG_INFLATION"
-    elif tax <= -0.18:
-        label = "SUPPRESS_MODERATE_INFLATION"
-    elif tax < 0:
-        label = "SUPPRESS_MICRO_INFLATION"
-    else:
-        label = "NO_SUPPRESSION"
-
-    return tax, label, f"final {final_proj:.2f} vs anchor {anchor:.2f}; over_anchor {over_anchor:.2f}"
-
-def _pis_decision(row, suppressed_proj):
-    line = _pis_num(row.get("UD/Line"), None)
-    if suppressed_proj is None:
-        return "NO_PROJECTION", ""
-    if line is None:
-        return "NO_UD_LINE", ""
-
-    edge = round(suppressed_proj - line, 2)
-    if edge >= 1.25:
-        return "🔥 OVER", edge
-    if edge >= 0.65:
-        return "⚠️ OVER LEAN", edge
-    if edge <= -1.25:
-        return "🔥 UNDER", edge
-    if edge <= -0.65:
-        return "⚠️ UNDER LEAN", edge
-    return "🚫 PASS — SUPPRESSED THIN EDGE", edge
-
-def _pis_apply(df):
-    if df is None or df.empty:
-        return df
-    d = df.copy()
-    taxes, labels, reasons, suppressed, decisions, edges = [], [], [], [], [], []
-
-    for _, rr in d.iterrows():
-        row = rr.to_dict()
-        base_final = _pis_num(row.get("Final K Projection"), None)
-        if base_final is None:
-            base_final = _pis_num(row.get("K PROJ"), None)
-
-        tax, label, reason = _pis_calc(row)
-        sp = round(base_final + tax, 2) if base_final is not None else None
-        dec, edge = _pis_decision(row, sp)
-
-        taxes.append(tax)
-        labels.append(label)
-        reasons.append(reason)
-        suppressed.append(sp if sp is not None else "")
-        decisions.append(dec)
-        edges.append(edge)
-
-    d["Inflation Suppression Tax"] = taxes
-    d["Inflation Suppression Label"] = labels
-    d["Inflation Suppression Reason"] = reasons
-    d["Suppressed Final K Projection"] = suppressed
-    d["Suppressed Final K Edge"] = edges
-    d["Suppressed Final K Decision"] = decisions
-    d["Inflation Suppression Version"] = PROJECTION_INFLATION_SUPPRESSION_VERSION
-
-    try:
-        if SUPPRESSION_OFFICIAL_APPLY_ENABLED and bool(st.session_state.get("use_inflation_suppressed_k_projection", False)):
-            if "K PROJ" in d.columns:
-                d["Pre-Suppression K PROJ"] = d["K PROJ"]
-                d["K PROJ"] = d["Suppressed Final K Projection"]
-            if "Decision" in d.columns:
-                d["Pre-Suppression Decision"] = d["Decision"]
-                d["Decision"] = d["Suppressed Final K Decision"]
-            if "Edge Gap" in d.columns:
-                d["Pre-Suppression Edge Gap"] = d["Edge Gap"]
-                d["Edge Gap"] = d["Suppressed Final K Edge"]
-            if "Main Engine Action" in d.columns:
-                d["Pre-Suppression Main Engine Action"] = d["Main Engine Action"]
-                d["Main Engine Action"] = d["Suppressed Final K Decision"]
-    except Exception:
-        pass
-
-    return d
-
-if "build_kproj_table" in globals():
-    _prev_pis_build_kproj_table = build_kproj_table
-
-    def build_kproj_table(board):
-        df = _prev_pis_build_kproj_table(board)
-        try:
-            return _pis_apply(df)
-        except Exception:
-            return df
-
-def render_projection_inflation_suppression_panel():
-    st.markdown("### 🧯 Projection Inflation Suppression 2.0 — OFFICIAL APPLY DISABLED TEST")
-    st.caption("Suppression preview remains visible, but it is NOT applied to official K PROJ/Decision in this V3 test.")
-    try:
-        st.session_state["use_inflation_suppressed_k_projection"] = st.toggle(
-            "Preview Inflation-Suppressed K Projection only",
-            value=st.session_state.get("use_inflation_suppressed_k_projection", False),
-            help="This V3 test keeps suppression as preview only. Official K PROJ is not overwritten by suppression.",
-            key="use_inflation_suppressed_k_projection_unique"
-        )
-    except Exception:
-        pass
-
-    try:
-        df = build_kproj_table(board) if "board" in globals() else pd.DataFrame()
-        cols = [c for c in [
-            "Pitcher", "Matchup", "Original K PROJ", "Pre-Suppression K PROJ", "K PROJ",
-            "Final K Projection", "Suppressed Final K Projection",
-            "UD/Line", "Suppressed Final K Edge", "Suppressed Final K Decision",
-            "Inflation Suppression Tax", "Inflation Suppression Label",
-            "Season Avg K", "Season Median K", "Season Recent3 K", "Opp Hist Avg K", "Opp Hist Starts",
-            "Inflation Suppression Reason"
-        ] if c in df.columns]
-        if cols:
-            st.dataframe(df[cols], use_container_width=True, hide_index=True)
-        else:
-            st.info("Inflation Suppression panel will populate after K board builds.")
-    except Exception as e:
-        st.info(f"Inflation Suppression waiting: {e}")
-
-
-# =========================
-# TEST 3 REALITY PROJECTION TUNER
-# Version: TEST3_REALITY_PROJECTION_TUNER_2026_06_13
-#
-# Adds:
-# 1) Projection Reality Check
-# 2) Dynamic Under Floor
-# 3) Conservative Moneyline Confidence Gate helper
-# =========================
-TEST3_REALITY_PROJECTION_TUNER_VERSION = "TEST3_REALITY_PROJECTION_TUNER_2026_06_13"
-
-def _t3_num(x, default=None):
-    try:
-        if x in (None, "", "—", "WAITING_FOR_UD_LINE"):
-            return default
-        v = float(x)
-        if pd.isna(v):
-            return default
-        return v
-    except Exception:
-        return default
-
-def _t3_cap(x, lo, hi):
-    try:
-        return max(lo, min(hi, float(x)))
-    except Exception:
-        return 0.0
-
-def _t3_anchor(row):
-    vals, weights = [], []
-    for col, w in [
-        ("Season Avg K", 0.36),
-        ("Season Median K", 0.24),
-        ("Season Recent3 K", 0.24),
-        ("Opp Hist Avg K", 0.16),
-    ]:
-        v = _t3_num(row.get(col), None)
-        if v is None:
-            continue
-        if col == "Opp Hist Avg K" and _t3_num(row.get("Opp Hist Starts"), 0) < 1:
-            continue
-        vals.append(v * w)
-        weights.append(w)
-    if not weights:
-        return None
-    return sum(vals) / sum(weights)
-
-def _t3_support(row):
-    support, notes = 0, []
-    checks = [
-        ("Season Avg K", 6.2, "SEASON_K_SUPPORT"),
-        ("Season Recent3 K", 6.0, "RECENT_K_SUPPORT"),
-        ("Opp Hist Avg K", 5.8, "OPP_HISTORY_SUPPORT"),
-        ("Pitcher K%", 25, "PITCHER_K_SKILL"),
-        ("Opp K%", 23, "OPP_K_MATCHUP"),
-        ("Putaway/Whiff", 24, "WHIFF_SUPPORT"),
-    ]
-    for col, thresh, note in checks:
-        v = _t3_num(row.get(col), None)
-        if v is not None and v >= thresh:
-            if col == "Opp Hist Avg K" and _t3_num(row.get("Opp Hist Starts"), 0) < 1:
-                continue
-            support += 1
-            notes.append(note)
-    exp_bf = _t3_num(row.get("Exp BF"), None)
-    season_bf = _t3_num(row.get("Season Avg BF"), None)
-    if exp_bf is not None and season_bf is not None and exp_bf <= season_bf + 2.0:
-        support += 1
-        notes.append("BF_REASONABLE")
-    return support, "|".join(notes)
-
-def _t3_adjust(row):
-    proj = _t3_num(row.get("Suppressed Final K Projection"), None)
-    if proj is None:
-        proj = _t3_num(row.get("Final K Projection"), None)
-    if proj is None:
-        proj = _t3_num(row.get("K PROJ"), None)
-    if proj is None:
-        return 0.0, "NO_PROJ", ""
-
-    starts = _t3_num(row.get("Season Starts"), 0)
-    if starts < 3:
-        return 0.0, "LOW_SAMPLE", ""
-
-    anchor = _t3_anchor(row)
-    if anchor is None:
-        return 0.0, "NO_ANCHOR", ""
-
-    support, support_notes = _t3_support(row)
-    adj = 0.0
-    labels = []
-    reasons = [f"proj {proj:.2f} anchor {anchor:.2f}", f"support {support}:{support_notes}"]
-
-    high_gap = proj - anchor
-    if high_gap >= 0.85:
-        if support >= 4:
-            rate, cap, label = 0.10, 0.28, "REALITY_TRIM_LIGHT_SUPPORTED"
-        elif support >= 2:
-            rate, cap, label = 0.16, 0.45, "REALITY_TRIM_MODERATE"
-        else:
-            rate, cap, label = 0.23, 0.70, "REALITY_TRIM_STRONG_UNSUPPORTED"
-        trim = -_t3_cap((high_gap - 0.55) * rate, 0.0, cap)
-        season_bf = _t3_num(row.get("Season Avg BF"), None)
-        exp_bf = _t3_num(row.get("Exp BF"), season_bf)
-        if season_bf is not None and exp_bf is not None and exp_bf > season_bf + 3.0:
-            trim -= 0.08
-            reasons.append("BF_ABOVE_SEASON")
-        adj += trim
-        labels.append(label)
-        reasons.append(f"HIGH_GAP_{high_gap:.2f}")
-
-    low_gap = anchor - proj
-    if low_gap >= 1.10:
-        season_avg = _t3_num(row.get("Season Avg K"), anchor)
-        pitcher_k = _t3_num(row.get("Pitcher K%"), None)
-        skill_ok = (season_avg >= 4.2) or (pitcher_k is not None and pitcher_k >= 20)
-        if skill_ok:
-            if support >= 3:
-                rate, cap, label = 0.22, 0.55, "UNDER_FLOOR_STRONG"
-            else:
-                rate, cap, label = 0.16, 0.38, "UNDER_FLOOR_MODERATE"
-            lift = _t3_cap((low_gap - 0.75) * rate, 0.0, cap)
-            adj += lift
-            labels.append(label)
-            reasons.append(f"LOW_GAP_{low_gap:.2f}")
-
-    line = _t3_num(row.get("UD/Line"), None)
-    if line is not None:
-        old_edge = proj - line
-        new_edge = proj + adj - line
-        if old_edge > 0 and new_edge < -0.20:
-            adj += abs(new_edge) * 0.50
-            reasons.append("SOFTEN_OVER_UNDER_FLIP")
-        if old_edge < 0 and new_edge > 0.20:
-            adj -= abs(new_edge) * 0.50
-            reasons.append("SOFTEN_UNDER_OVER_FLIP")
-
-    adj = round(_t3_cap(adj, -0.80, 0.65), 2)
-    label = "|".join(labels) if labels else "REALITY_NO_CHANGE"
-    return adj, label, "; ".join(reasons)
-
-def _t3_decision(row, proj):
-    line = _t3_num(row.get("UD/Line"), None)
-    if proj is None:
-        return "NO_PROJECTION", ""
-    if line is None:
-        return "NO_UD_LINE", ""
-    edge = round(proj - line, 2)
-    if edge >= 1.30:
-        return "🔥 OVER", edge
-    if edge >= 0.70:
-        return "⚠️ OVER LEAN", edge
-    if edge <= -1.30:
-        return "🔥 UNDER", edge
-    if edge <= -0.70:
-        return "⚠️ UNDER LEAN", edge
-    return "🚫 PASS — REALITY THIN EDGE", edge
-
-def _t3_apply(df):
-    if df is None or df.empty:
-        return df
-    d = df.copy()
-    adjs, labels, reasons, projs, decisions, edges = [], [], [], [], [], []
-    for _, rr in d.iterrows():
-        row = rr.to_dict()
-        base = _t3_num(row.get("Suppressed Final K Projection"), None)
-        if base is None:
-            base = _t3_num(row.get("Final K Projection"), None)
-        if base is None:
-            base = _t3_num(row.get("K PROJ"), None)
-        adj, label, reason = _t3_adjust(row)
-        rp = round(base + adj, 2) if base is not None else None
-        dec, edge = _t3_decision(row, rp)
-        adjs.append(adj)
-        labels.append(label)
-        reasons.append(reason)
-        projs.append(rp if rp is not None else "")
-        decisions.append(dec)
-        edges.append(edge)
-
-    d["Reality Check Adjustment"] = adjs
-    d["Reality Check Label"] = labels
-    d["Reality Check Reason"] = reasons
-    d["Reality K Projection"] = projs
-    d["Reality K Edge"] = edges
-    d["Reality K Decision"] = decisions
-    d["Reality Tuner Version"] = TEST3_REALITY_PROJECTION_TUNER_VERSION
-
-    try:
-        if bool(st.session_state.get("use_test3_reality_projection", True)):
-            if "K PROJ" in d.columns:
-                d["Pre-Test3 K PROJ"] = d["K PROJ"]
-                d["K PROJ"] = d["Reality K Projection"]
-            if "Decision" in d.columns:
-                d["Pre-Test3 Decision"] = d["Decision"]
-                d["Decision"] = d["Reality K Decision"]
-            if "Edge Gap" in d.columns:
-                d["Pre-Test3 Edge Gap"] = d["Edge Gap"]
-                d["Edge Gap"] = d["Reality K Edge"]
-            if "Main Engine Action" in d.columns:
-                d["Pre-Test3 Main Engine Action"] = d["Main Engine Action"]
-                d["Main Engine Action"] = d["Reality K Decision"]
-    except Exception:
-        pass
-    return d
-
-if "build_kproj_table" in globals():
-    _prev_t3_build_kproj_table = build_kproj_table
-    def build_kproj_table(board):
-        df = _prev_t3_build_kproj_table(board)
-        try:
-            return _t3_apply(df)
-        except Exception:
-            return df
-
-def render_test3_reality_projection_panel():
-    st.markdown("### 🎛️ Test 3 Reality Projection Tuner")
-    st.caption("Projection Reality Check + Dynamic Under Floor. Keeps matchup-supported upside, trims unsupported inflation, and lifts extreme low under projections.")
-    try:
-        st.session_state["use_test3_reality_projection"] = st.toggle(
-            "Use Test 3 Reality Projection",
-            value=st.session_state.get("use_test3_reality_projection", True),
-            help="ON = official K PROJ/Decision use Test 3 Reality Projection.",
-            key="use_test3_reality_projection_unique"
-        )
-    except Exception:
-        pass
-    try:
-        df = build_kproj_table(board) if "board" in globals() else pd.DataFrame()
-        cols = [c for c in [
-            "Pitcher", "Matchup", "Pre-Test3 K PROJ", "K PROJ", "Reality K Projection",
-            "UD/Line", "Reality K Edge", "Reality K Decision",
-            "Reality Check Adjustment", "Reality Check Label",
-            "Season Avg K", "Season Median K", "Season Recent3 K",
-            "Opp Hist Avg K", "Opp Hist Starts", "Exp BF", "Season Avg BF",
-            "Pitcher K%", "Opp K%", "Putaway/Whiff", "Reality Check Reason"
-        ] if c in df.columns]
-        if cols:
-            st.dataframe(df[cols], use_container_width=True, hide_index=True)
-        else:
-            st.info("Test 3 panel will populate after K board builds.")
-    except Exception as e:
-        st.info(f"Test 3 waiting: {e}")
-
-# Moneyline helper: available for future renderer integration, intentionally non-invasive.
-def apply_moneyline_confidence_gate_df(df):
-    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        return df
-    d = df.copy()
-    scores, labels = [], []
-    for _, rr in d.iterrows():
-        row = {str(k).lower(): v for k, v in rr.to_dict().items()}
-        score = 50
-        for k, v in row.items():
-            if "run diff" in k or "run differential" in k:
-                rd = abs(_t3_num(v, 0) or 0)
-                score += 18 if rd >= 1.0 else 10 if rd >= 0.55 else -8 if rd < 0.25 else 0
-                break
-        for k, v in row.items():
-            if "edge" in k and "%" in k:
-                e = abs(_t3_num(v, 0) or 0)
-                score += 14 if e >= 8 else 7 if e >= 4 else -8 if e < 2 else 0
-                break
-        score = max(0, min(100, score))
-        label = "ML_PLAY_CONFIDENT" if score >= 72 else "ML_LEAN_ONLY" if score >= 60 else "ML_PASS_WEAK_EDGE"
-        scores.append(score); labels.append(label)
-    d["ML Confidence Gate Score"] = scores
-    d["ML Confidence Gate"] = labels
-    d["ML Confidence Gate Version"] = "MONEYLINE_CONFIDENCE_GATE_2026_06_13"
-    return d
-
-
-# =========================
-# LINE-AWARE HIT RATE ENGINE
-# Version: LINE_AWARE_HIT_RATE_ENGINE_2026_06_13
-#
-# Purpose:
-# - Uses embedded Pitch.csv logs from Opening Day -> pull date.
-# - Calculates how often a pitcher cleared TODAY'S line, not a fixed historical line.
-# - Also checks close-line bands because lines change over time.
-# - Adds season hit rate, recent hit rate, opponent hit rate, and line-band rate.
-# - Uses hit-rate context as a small projection/decision modifier.
-#
-# Important:
-# - This does NOT assume lines were always 5.5 or always the same.
-# - It compares historical K outcomes to the current posted line dynamically.
-# =========================
-LINE_AWARE_HIT_RATE_ENGINE_VERSION = "LINE_AWARE_HIT_RATE_ENGINE_2026_06_13"
-
-def _lahr_num(x, default=None):
-    try:
-        if x in (None, "", "—", "WAITING_FOR_UD_LINE"):
-            return default
-        v = float(x)
-        if pd.isna(v):
-            return default
-        return v
-    except Exception:
-        return default
-
-def _lahr_norm_name(x):
+def _tpc_norm_name(x):
     try:
         s = str(x or "").strip().lower().replace(".", "")
         s = re.sub(r"[^a-z0-9\s'\-]", "", s)
@@ -20965,315 +20599,1921 @@ def _lahr_norm_name(x):
     except Exception:
         return str(x or "").strip().lower()
 
-def _lahr_line(row):
+def _tpc_line(row):
     for c in ["UD/Line", "Line", "line", "K Line"]:
-        v = _lahr_num(row.get(c), None)
+        v = _tpc_num(row.get(c), None)
         if v is not None:
             return v
     return None
 
-def _lahr_pitcher_logs_for(player):
-    try:
-        df = _v3_get_pitcher_log_source() if "_v3_get_pitcher_log_source" in globals() else st.session_state.get("pitcher_season_logs")
-        if not isinstance(df, pd.DataFrame) or df.empty:
-            df = st.session_state.get("pitcher_30_day_logs")
-        if not isinstance(df, pd.DataFrame) or df.empty or "Pitcher" not in df.columns:
-            return pd.DataFrame()
-        d = df.copy()
-        d["_p_norm"] = d["Pitcher"].map(_lahr_norm_name)
-        d = d[d["_p_norm"] == _lahr_norm_name(player)].copy()
-        if d.empty:
-            return pd.DataFrame()
-        for c in ["K", "Ks", "SO", "IP", "IP_float", "BF", "Pitch Count", "Pitches", "ER", "HR", "BB", "WHIP"]:
-            if c in d.columns:
-                d[c] = pd.to_numeric(d[c], errors="coerce")
-        if "K" not in d.columns:
-            for alt in ["Ks", "SO"]:
-                if alt in d.columns:
-                    d["K"] = pd.to_numeric(d[alt], errors="coerce")
-                    break
-        if "Date" in d.columns:
-            d["_date"] = pd.to_datetime(d["Date"], errors="coerce")
-            d = d.sort_values("_date")
-        return d
-    except Exception:
-        return pd.DataFrame()
+def _tpc_pitcher_col(df):
+    return next((c for c in ["Pitcher", "Player", "Name", "pitcher"] if c in df.columns), None)
 
-def _lahr_current_opponent(row):
+def _tpc_load_embedded_pitch_logs():
+    """
+    Guaranteed embedded Pitch.csv loader.
+    Fixes cases where learning_data/Pitch.csv exists in GitHub,
+    but session_state logs are empty after refresh/redeploy.
+    """
     try:
-        # Prefer opponent already calculated by OHE if present.
+        cached = st.session_state.get("_tpc_embedded_pitch_logs_cache")
+        if isinstance(cached, pd.DataFrame) and not cached.empty:
+            return cached.copy()
+    except Exception:
+        pass
+
+    try:
+        from pathlib import Path as _Path
+        candidates = [
+            _Path("learning_data") / "Pitch.csv",
+            _Path.cwd() / "learning_data" / "Pitch.csv",
+            _Path(__file__).resolve().parent / "learning_data" / "Pitch.csv",
+        ]
+        for p in candidates:
+            if p.exists():
+                df = pd.read_csv(p)
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    for c in ["K", "Ks", "SO", "IP", "BF", "Pitch Count", "Pitches", "ER", "HR", "BB", "WHIP"]:
+                        if c in df.columns:
+                            df[c] = pd.to_numeric(df[c], errors="coerce")
+                    if "Date" in df.columns:
+                        df["_date"] = pd.to_datetime(df["Date"], errors="coerce")
+                    try:
+                        st.session_state["_tpc_embedded_pitch_logs_cache"] = df.copy()
+                        st.session_state["pitcher_season_logs"] = df.copy()
+                    except Exception:
+                        pass
+                    return df.copy()
+    except Exception:
+        pass
+
+    return pd.DataFrame()
+
+def _tpc_get_logs_for_pitcher(player):
+    """
+    Reads pitcher game logs from:
+    1) st.session_state pitcher_season_logs
+    2) st.session_state pitcher_30_day_logs fallback
+    3) embedded learning_data/Pitch.csv guaranteed fallback
+    """
+    try:
+        sources = []
+        for key in ["pitcher_season_logs", "pitcher_30_day_logs"]:
+            df = st.session_state.get(key)
+            if isinstance(df, pd.DataFrame) and not df.empty and "Pitcher" in df.columns:
+                sources.append(df.copy())
+
+        embedded = _tpc_load_embedded_pitch_logs()
+        if isinstance(embedded, pd.DataFrame) and not embedded.empty and "Pitcher" in embedded.columns:
+            sources.append(embedded.copy())
+
+        for d in sources:
+            d["_p_norm"] = d["Pitcher"].map(_tpc_norm_name)
+            d = d[d["_p_norm"] == _tpc_norm_name(player)].copy()
+            if not d.empty:
+                for c in ["K", "Ks", "SO", "IP", "BF", "Pitch Count", "Pitches", "ER", "HR", "BB", "WHIP"]:
+                    if c in d.columns:
+                        d[c] = pd.to_numeric(d[c], errors="coerce")
+                if "Date" in d.columns:
+                    d["_date"] = pd.to_datetime(d["Date"], errors="coerce")
+                    d = d.sort_values("_date")
+                return d
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+def _tpc_k_col(d):
+    for c in ["K", "Ks", "SO", "Strikeouts"]:
+        if c in d.columns:
+            return c
+    return None
+
+def _tpc_current_opp(row):
+    try:
         opp = str(row.get("Opp Hist Opponent") or "").upper().strip()
         if opp:
             return opp[:3]
     except Exception:
         pass
     try:
-        if "_ohe_current_opponent_from_row" in globals():
-            return str(_ohe_current_opponent_from_row(row)).upper()[:3]
+        matchup = str(row.get("Matchup") or "")
+        team = str(row.get("Team") or row.get("Pitcher Team") or "").upper()
+        if "@" in matchup:
+            a, h = matchup.split("@", 1)
+            a, h = a.strip().upper(), h.strip().upper()
+            if team and team in a:
+                return h[:3]
+            if team and team in h:
+                return a[:3]
     except Exception:
         pass
     return ""
 
-def _lahr_rate(values, line):
-    vals = [float(x) for x in values if x is not None and not pd.isna(x)]
+def _tpc_rate(vals, line):
+    vals = [float(x) for x in vals if x is not None and not pd.isna(x)]
     if not vals or line is None:
-        return "", 0, 0
-    # For strikeout over, clearing line means K > line. 5.5 clears at 6+.
+        return None, 0, 0
     clears = sum(1 for x in vals if x > float(line))
-    return round((clears / len(vals)) * 100, 1), clears, len(vals)
+    return round(clears / len(vals) * 100, 1), clears, len(vals)
 
-def _lahr_profile(player, line, row):
-    d = _lahr_pitcher_logs_for(player)
-    if d.empty or line is None or "K" not in d.columns:
-        return {}
+def _tpc_profile(player, row):
+    line = _tpc_line(row)
+    d = _tpc_get_logs_for_pitcher(player)
+    if d.empty or line is None:
+        return {"TPC Log Sample": 0, "TPC Status": "NO_LOG_OR_LINE"}
+    kc = _tpc_k_col(d)
+    if not kc:
+        return {"TPC Log Sample": len(d), "TPC Status": "NO_K_COLUMN"}
 
-    k_vals = d["K"].dropna().astype(float).tolist()
-    season_rate, season_clears, season_games = _lahr_rate(k_vals, line)
+    k_vals = d[kc].dropna().astype(float).tolist()
+    season_rate, season_clears, season_games = _tpc_rate(k_vals, line)
+    recent5_vals = d.tail(5)[kc].dropna().astype(float).tolist()
+    recent_rate, recent_clears, recent_games = _tpc_rate(recent5_vals, line)
+    recent3_vals = d.tail(3)[kc].dropna().astype(float).tolist()
+    recent3_rate, recent3_clears, recent3_games = _tpc_rate(recent3_vals, line)
+    band_vals = [x for x in k_vals if (float(line) - 1.0) <= x <= (float(line) + 2.0)]
+    band_rate, band_clears, band_games = _tpc_rate(band_vals, line)
 
-    recent = d.tail(5)
-    recent_vals = recent["K"].dropna().astype(float).tolist() if "K" in recent.columns else []
-    recent_rate, recent_clears, recent_games = _lahr_rate(recent_vals, line)
-
-    # Close-line band: not assuming historical line was today's line.
-    # This shows how many historical K outcomes were near today's threshold.
-    # Example current line 5.5: band checks outcomes around 4.5 to 6.5.
-    band_low = float(line) - 1.0
-    band_high = float(line) + 1.0
-    band_vals = [x for x in k_vals if band_low <= x <= band_high + 1.0]
-    band_rate, band_clears, band_games = _lahr_rate(band_vals, line)
-
-    # Opponent-specific hit rate vs today's current line
-    opp = _lahr_current_opponent(row)
-    opp_rate = opp_clears = opp_games = ""
+    opp = _tpc_current_opp(row)
+    opp_rate = opp_clears = opp_games = None
     if opp and "Opponent" in d.columns:
         od = d[d["Opponent"].astype(str).str.upper().str.contains(opp, na=False)].copy()
         if not od.empty:
-            opp_vals = od["K"].dropna().astype(float).tolist()
-            opp_rate, opp_clears, opp_games = _lahr_rate(opp_vals, line)
+            opp_vals = od[kc].dropna().astype(float).tolist()
+            opp_rate, opp_clears, opp_games = _tpc_rate(opp_vals, line)
 
-    # Also capture actual K results for transparency.
+    def avg(vals):
+        vals = [float(x) for x in vals if x is not None and not pd.isna(x)]
+        return round(sum(vals)/len(vals), 2) if vals else None
+
+    season_avg = avg(k_vals)
+    season_med = round(float(pd.Series(k_vals).median()), 2) if k_vals else None
+    recent5_avg = avg(recent5_vals)
+    recent3_avg = avg(recent3_vals)
+
+    bf_col = next((c for c in ["BF", "Batters Faced"] if c in d.columns), None)
+    ip_col = next((c for c in ["IP", "IP_float"] if c in d.columns), None)
+    pc_col = next((c for c in ["Pitch Count", "Pitches"] if c in d.columns), None)
+
+    season_bf = round(float(pd.to_numeric(d[bf_col], errors="coerce").mean()), 2) if bf_col else None
+    recent_bf = round(float(pd.to_numeric(d.tail(5)[bf_col], errors="coerce").mean()), 2) if bf_col else None
+    season_ip = round(float(pd.to_numeric(d[ip_col], errors="coerce").mean()), 2) if ip_col else None
+    season_pc = round(float(pd.to_numeric(d[pc_col], errors="coerce").mean()), 1) if pc_col else None
     last_results = ", ".join(str(int(x)) if float(x).is_integer() else str(round(x, 1)) for x in k_vals[-8:])
 
     return {
-        "Line Aware Current Line": line,
-        "Line Aware Season Hit Rate %": season_rate,
-        "Line Aware Season Clears": season_clears,
-        "Line Aware Season Games": season_games,
-        "Line Aware Recent5 Hit Rate %": recent_rate,
-        "Line Aware Recent5 Clears": recent_clears,
-        "Line Aware Recent5 Games": recent_games,
-        "Line Aware Band Hit Rate %": band_rate,
-        "Line Aware Band Clears": band_clears,
-        "Line Aware Band Games": band_games,
-        "Line Aware Opp Hit Rate %": opp_rate,
-        "Line Aware Opp Clears": opp_clears,
-        "Line Aware Opp Games": opp_games,
-        "Line Aware Last K Results": last_results,
-        "Line Aware Engine Version": LINE_AWARE_HIT_RATE_ENGINE_VERSION,
+        "TPC Status": "OK",
+        "TPC Log Sample": len(d),
+        "TPC Current Line": line,
+        "TPC Season Avg K": season_avg,
+        "TPC Season Median K": season_med,
+        "TPC Recent5 Avg K": recent5_avg,
+        "TPC Recent3 Avg K": recent3_avg,
+        "TPC Season Hit Rate %": season_rate,
+        "TPC Season Clears": season_clears,
+        "TPC Season Games": season_games,
+        "TPC Recent5 Hit Rate %": recent_rate,
+        "TPC Recent5 Clears": recent_clears,
+        "TPC Recent5 Games": recent_games,
+        "TPC Recent3 Hit Rate %": recent3_rate,
+        "TPC Band Hit Rate %": band_rate,
+        "TPC Band Games": band_games,
+        "TPC Opp Hit Rate %": opp_rate,
+        "TPC Opp Clears": opp_clears,
+        "TPC Opp Games": opp_games,
+        "TPC Opponent": opp,
+        "TPC Season Avg BF": season_bf,
+        "TPC Recent5 Avg BF": recent_bf,
+        "TPC Season Avg IP": season_ip,
+        "TPC Season Avg Pitch Count": season_pc,
+        "TPC Last K Results": last_results,
     }
 
-def _lahr_adjust(row):
-    """
-    Uses hit rate as a confidence/projection stabilizer.
-    This is conservative:
-    - Strong hit-rate support can slightly lift/keep overs.
-    - Poor hit-rate support can slightly trim inflated overs.
-    - It does not force projection to hit rate alone.
-    """
-    proj = _lahr_num(row.get("Reality K Projection"), None)
-    if proj is None:
-        proj = _lahr_num(row.get("Suppressed Final K Projection"), None)
-    if proj is None:
-        proj = _lahr_num(row.get("Final K Projection"), None)
-    if proj is None:
-        proj = _lahr_num(row.get("K PROJ"), None)
-    line = _lahr_line(row)
-    if proj is None or line is None:
-        return 0.0, "NO_LINE_OR_PROJ", ""
+def _tpc_weighted_anchor(row):
+    vals, weights = [], []
+    for c, w in [
+        ("TPC Season Avg K", 0.30),
+        ("TPC Season Median K", 0.18),
+        ("TPC Recent5 Avg K", 0.20),
+        ("TPC Recent3 Avg K", 0.14),
+        ("Opp Hist Avg K", 0.08),
+        ("Season Avg K", 0.06),
+        ("Season Median K", 0.04),
+    ]:
+        v = _tpc_num(row.get(c), None)
+        if v is not None:
+            vals.append(v*w); weights.append(w)
+    if not weights:
+        return None
+    return sum(vals) / sum(weights)
 
-    season_rate = _lahr_num(row.get("Line Aware Season Hit Rate %"), None)
-    recent_rate = _lahr_num(row.get("Line Aware Recent5 Hit Rate %"), None)
-    band_rate = _lahr_num(row.get("Line Aware Band Hit Rate %"), None)
-    opp_rate = _lahr_num(row.get("Line Aware Opp Hit Rate %"), None)
-    season_games = _lahr_num(row.get("Line Aware Season Games"), 0)
-    recent_games = _lahr_num(row.get("Line Aware Recent5 Games"), 0)
-    opp_games = _lahr_num(row.get("Line Aware Opp Games"), 0)
+def _tpc_hit_score(row):
+    parts, weights = [], []
+    for c, w, min_games_c in [
+        ("TPC Season Hit Rate %", 0.48, "TPC Season Games"),
+        ("TPC Recent5 Hit Rate %", 0.24, "TPC Recent5 Games"),
+        ("TPC Recent3 Hit Rate %", 0.10, None),
+        ("TPC Band Hit Rate %", 0.10, "TPC Band Games"),
+        ("TPC Opp Hit Rate %", 0.08, "TPC Opp Games"),
+    ]:
+        v = _tpc_num(row.get(c), None)
+        if v is None:
+            continue
+        if min_games_c and c != "TPC Season Hit Rate %" and (_tpc_num(row.get(min_games_c), 0) or 0) < 2:
+            continue
+        parts.append(v*w); weights.append(w)
+    if not weights:
+        return None
+    return sum(parts) / sum(weights)
 
-    if season_games < 3 or season_rate is None:
-        return 0.0, "LOW_HIT_RATE_SAMPLE", ""
+def _tpc_support(row):
+    support, notes = 0, []
+    for c, threshold, note in [
+        ("Pitcher K%", 25, "PITCHER_K"),
+        ("Opp K%", 23, "OPP_K"),
+        ("Putaway/Whiff", 24, "WHIFF"),
+        ("TPC Recent5 Avg K", 5.8, "RECENT_AVG"),
+        ("TPC Season Avg K", 5.8, "SEASON_AVG"),
+    ]:
+        v = _tpc_num(row.get(c), None)
+        if v is not None and v >= threshold:
+            support += 1; notes.append(note)
+    hit_score = _tpc_hit_score(row)
+    if hit_score is not None and hit_score >= 62:
+        support += 1; notes.append("HIT_RATE")
+    exp_bf = _tpc_num(row.get("Exp BF"), None)
+    season_bf = _tpc_num(row.get("TPC Season Avg BF"), _tpc_num(row.get("Season Avg BF"), None))
+    if exp_bf is not None and season_bf is not None and exp_bf <= season_bf + 2.5:
+        support += 1; notes.append("BF_OK")
+    return support, "|".join(notes)
 
-    # Weighted hit-rate score vs today's current line
-    rates = []
-    weights = []
-    rates.append(season_rate); weights.append(0.50)
-    if recent_rate is not None and recent_games >= 3:
-        rates.append(recent_rate); weights.append(0.25)
-    if band_rate is not None and _lahr_num(row.get("Line Aware Band Games"), 0) >= 2:
-        rates.append(band_rate); weights.append(0.15)
-    if opp_rate is not None and opp_games >= 1:
-        rates.append(opp_rate); weights.append(0.10)
+def _tpc_base_projection(row):
+    for c in ["Reality K Projection", "Line Aware Final K Projection", "Suppressed Final K Projection", "Final K Projection", "K PROJ", "Projection", "Proj"]:
+        v = _tpc_num(row.get(c), None)
+        if v is not None:
+            return v
+    return None
 
-    hit_score = sum(r*w for r, w in zip(rates, weights)) / sum(weights)
+def _tpc_adjust(row):
+    base = _tpc_base_projection(row)
+    if base is None:
+        return None, 0.0, "NO_BASE_PROJ", ""
+    line = _tpc_line(row)
+    sample = _tpc_num(row.get("TPC Log Sample"), 0) or 0
+    if sample < 3:
+        return base, 0.0, "LOW_LOG_SAMPLE", ""
 
-    edge = proj - line
-    adj = 0.0
-    label = "HIT_RATE_NEUTRAL"
+    anchor = _tpc_weighted_anchor(row)
+    hit_score = _tpc_hit_score(row)
+    if anchor is None:
+        return base, 0.0, "NO_ANCHOR", ""
 
-    # If projection likes over but hit rate is bad, trim.
-    if edge >= 0.65 and hit_score < 45:
-        adj -= 0.28
-        label = "HIT_RATE_TRIM_OVER"
-    elif edge >= 1.25 and hit_score < 55:
-        adj -= 0.18
-        label = "HIT_RATE_MICRO_TRIM_OVER"
+    support, support_notes = _tpc_support(row)
+    adj, labels = 0.0, []
+    reasons = [f"base {base:.2f}", f"anchor {anchor:.2f}", f"support {support}:{support_notes}"]
+    if hit_score is not None:
+        reasons.append(f"hit_score {hit_score:.1f}")
 
-    # If projection is close or under but hit rate strongly supports clearing line, lift slightly.
-    elif edge <= 0.35 and hit_score >= 65:
-        adj += 0.22
-        label = "HIT_RATE_LIFT_OVER_SUPPORT"
-    elif edge >= 0.35 and hit_score >= 70:
-        adj += 0.12
-        label = "HIT_RATE_CONFIRM_OVER"
+    gap = base - anchor
+    if gap >= 0.75:
+        if support >= 5:
+            rate, cap, label = 0.10, 0.25, "LIGHT_HIGH_TRIM_SUPPORTED"
+        elif support >= 3:
+            rate, cap, label = 0.17, 0.45, "MODERATE_HIGH_TRIM"
+        else:
+            rate, cap, label = 0.24, 0.75, "STRONG_HIGH_TRIM"
+        adj -= _tpc_cap((gap - 0.45) * rate, 0.0, cap)
+        labels.append(label); reasons.append(f"HIGH_GAP_{gap:.2f}")
+    elif gap <= -0.95:
+        if support >= 3:
+            rate, cap, label = 0.20, 0.55, "UNDER_FLOOR_LIFT"
+        else:
+            rate, cap, label = 0.13, 0.35, "SMALL_UNDER_FLOOR_LIFT"
+        adj += _tpc_cap((abs(gap) - 0.55) * rate, 0.0, cap)
+        labels.append(label); reasons.append(f"LOW_GAP_{gap:.2f}")
 
-    # If line-aware history strongly supports under and projection is thin, push to pass/under.
-    if edge > -0.35 and edge < 0.70 and hit_score <= 35:
-        adj -= 0.18
-        label = "HIT_RATE_UNDER_SUPPORT"
+    if line is not None and hit_score is not None:
+        edge = base - line
+        if edge >= 0.65 and hit_score < 43:
+            adj -= 0.30; labels.append("HIT_RATE_DISAGREES_OVER")
+        elif edge >= 1.25 and hit_score < 55:
+            adj -= 0.18; labels.append("HIT_RATE_WEAKENS_OVER")
+        elif edge <= 0.35 and hit_score >= 66:
+            adj += 0.25; labels.append("HIT_RATE_SUPPORTS_OVER")
+        elif edge >= 0.35 and hit_score >= 70:
+            adj += 0.12; labels.append("HIT_RATE_CONFIRMS_OVER")
+        elif -0.35 < edge < 0.70 and hit_score <= 35:
+            adj -= 0.18; labels.append("HIT_RATE_UNDER_SUPPORT")
 
-    # Protect true ceiling if season/recent/skill support exists.
-    support = 0
-    for c, thresh in [("Season Avg K", 6.2), ("Season Recent3 K", 6.0), ("Pitcher K%", 25), ("Opp K%", 23), ("Putaway/Whiff", 24)]:
-        v = _lahr_num(row.get(c), None)
-        if v is not None and v >= thresh:
-            support += 1
-    if support >= 4 and adj < 0:
-        adj = max(adj, -0.12)
-        label += "|CEILING_PROTECTED"
+    exp_bf = _tpc_num(row.get("Exp BF"), None)
+    season_bf = _tpc_num(row.get("TPC Season Avg BF"), _tpc_num(row.get("Season Avg BF"), None))
+    recent_bf = _tpc_num(row.get("TPC Recent5 Avg BF"), None)
+    bf_vals = [v for v in [season_bf, recent_bf] if v is not None]
+    if exp_bf is not None and bf_vals:
+        bf_anchor = sum(bf_vals) / len(bf_vals)
+        bf_gap = exp_bf - bf_anchor
+        if bf_gap >= 3.0:
+            adj -= _tpc_cap((bf_gap - 2.0) * 0.035, 0.05, 0.22)
+            labels.append("VOLUME_REALITY_TRIM"); reasons.append(f"BF_GAP_{bf_gap:.1f}")
+        elif bf_gap <= -3.0 and support >= 3:
+            adj += _tpc_cap((abs(bf_gap)-2.0) * 0.025, 0.03, 0.15)
+            labels.append("VOLUME_UNDER_FLOOR_LIFT")
 
-    adj = round(max(-0.35, min(0.30, adj)), 2)
-    reason = f"hit_score {hit_score:.1f}; season {season_rate}; recent {recent_rate}; band {band_rate}; opp {opp_rate}; edge {edge:.2f}"
-    return adj, label, reason
+    projected_after = base + adj
+    if line is not None and anchor is not None:
+        max_allowed = anchor + (1.15 if support >= 5 else 0.85 if support >= 3 else 0.55)
+        if hit_score is not None and hit_score >= 68:
+            max_allowed += 0.25
+        if projected_after > max_allowed and projected_after - line >= 1.5:
+            cut = min(projected_after - max_allowed, 0.55)
+            adj -= cut
+            labels.append("SOFT_CEILING_CLAMP"); reasons.append(f"CEILING_{max_allowed:.2f}")
 
-def _lahr_decision(row, proj):
-    line = _lahr_line(row)
+    adj = round(_tpc_cap(adj, -0.95, 0.75), 2)
+    final = round(base + adj, 2)
+
+    if line is not None:
+        old_edge = base - line
+        new_edge = final - line
+        if old_edge > 0.25 and new_edge < -0.25:
+            final = round(line - 0.20, 2); adj = round(final - base, 2); labels.append("SOFTEN_OVER_TO_UNDER_FLIP")
+        elif old_edge < -0.25 and new_edge > 0.25:
+            final = round(line + 0.20, 2); adj = round(final - base, 2); labels.append("SOFTEN_UNDER_TO_OVER_FLIP")
+
+    return final, adj, "|".join(labels) if labels else "TPC_NO_CHANGE", "; ".join(reasons)
+
+def _tpc_decision(row, proj):
+    line = _tpc_line(row)
     if proj is None:
         return "NO_PROJECTION", ""
     if line is None:
         return "NO_UD_LINE", ""
     edge = round(proj - line, 2)
-    if edge >= 1.30:
+    hit_score = _tpc_hit_score(row)
+    if -0.65 < edge < 0.65:
+        return "🚫 PASS — TRUE EDGE THIN", edge
+    if edge > 0 and hit_score is not None and hit_score < 42 and edge < 1.35:
+        return "🚫 PASS — HIT RATE CONFLICT", edge
+    if edge < 0 and hit_score is not None and hit_score > 62 and abs(edge) < 1.15:
+        return "🚫 PASS — UNDER HIT RATE CONFLICT", edge
+    if edge >= 1.35:
         return "🔥 OVER", edge
     if edge >= 0.70:
         return "⚠️ OVER LEAN", edge
-    if edge <= -1.30:
+    if edge <= -1.35:
         return "🔥 UNDER", edge
     if edge <= -0.70:
         return "⚠️ UNDER LEAN", edge
-    return "🚫 PASS — LINE HIT RATE THIN EDGE", edge
+    return "🚫 PASS — TRUE EDGE THIN", edge
 
-def _lahr_apply(df):
+def _tpc_apply(df):
     if df is None or df.empty:
         return df
     d = df.copy()
-    pcol = next((c for c in ["Pitcher", "Player", "Name"] if c in d.columns), None)
+    pcol = _tpc_pitcher_col(d)
     if not pcol:
         return d
-
     profiles = []
     for _, rr in d.iterrows():
-        row = rr.to_dict()
-        player = row.get(pcol, "")
-        line = _lahr_line(row)
-        profiles.append(_lahr_profile(player, line, row))
-
-    prof_df = pd.DataFrame(profiles)
-    if not prof_df.empty:
-        for c in prof_df.columns:
+        profiles.append(_tpc_profile(rr.to_dict().get(pcol, ""), rr.to_dict()))
+    prof = pd.DataFrame(profiles)
+    if not prof.empty:
+        for c in prof.columns:
             if c in d.columns:
                 d.drop(columns=[c], inplace=True)
-        d = pd.concat([d.reset_index(drop=True), prof_df.reset_index(drop=True)], axis=1)
+        d = pd.concat([d.reset_index(drop=True), prof.reset_index(drop=True)], axis=1)
 
-    adjs, labels, reasons, final_projs, decisions, edges = [], [], [], [], [], []
+    finals, adjs, labels, reasons, decisions, edges = [], [], [], [], [], []
     for _, rr in d.iterrows():
         row = rr.to_dict()
-        base = _lahr_num(row.get("Reality K Projection"), None)
-        if base is None:
-            base = _lahr_num(row.get("K PROJ"), None)
-        adj, label, reason = _lahr_adjust(row)
-        final = round(base + adj, 2) if base is not None else None
-        dec, edge = _lahr_decision(row, final)
+        final, adj, label, reason = _tpc_adjust(row)
+        dec, edge = _tpc_decision(row, final)
+        finals.append(final if final is not None else "")
         adjs.append(adj); labels.append(label); reasons.append(reason)
-        final_projs.append(final if final is not None else "")
         decisions.append(dec); edges.append(edge)
 
-    d["Line Aware Hit Rate Adjustment"] = adjs
-    d["Line Aware Hit Rate Label"] = labels
-    d["Line Aware Hit Rate Reason"] = reasons
-    d["Line Aware Final K Projection"] = final_projs
-    d["Line Aware Final K Edge"] = edges
-    d["Line Aware Final K Decision"] = decisions
+    d["TPC True K Projection"] = finals
+    d["TPC Adjustment"] = adjs
+    d["TPC Label"] = labels
+    d["TPC Reason"] = reasons
+    d["TPC Edge"] = edges
+    d["TPC Decision"] = decisions
+    d["TPC Version"] = TRUE_PROJECTION_CALIBRATION_TEST_VERSION
 
     try:
-        if bool(st.session_state.get("use_line_aware_hit_rate_projection", True)):
+        if bool(st.session_state.get("use_true_projection_calibration_test", True)):
             if "K PROJ" in d.columns:
-                d["Pre-LineAware K PROJ"] = d["K PROJ"]
-                d["K PROJ"] = d["Line Aware Final K Projection"]
+                d["Pre-TPC K PROJ"] = d["K PROJ"]
+                d["K PROJ"] = d["TPC True K Projection"]
             if "Decision" in d.columns:
-                d["Pre-LineAware Decision"] = d["Decision"]
-                d["Decision"] = d["Line Aware Final K Decision"]
+                d["Pre-TPC Decision"] = d["Decision"]
+                d["Decision"] = d["TPC Decision"]
             if "Edge Gap" in d.columns:
-                d["Pre-LineAware Edge Gap"] = d["Edge Gap"]
-                d["Edge Gap"] = d["Line Aware Final K Edge"]
+                d["Pre-TPC Edge Gap"] = d["Edge Gap"]
+                d["Edge Gap"] = d["TPC Edge"]
             if "Main Engine Action" in d.columns:
-                d["Pre-LineAware Main Engine Action"] = d["Main Engine Action"]
-                d["Main Engine Action"] = d["Line Aware Final K Decision"]
+                d["Pre-TPC Main Engine Action"] = d["Main Engine Action"]
+                d["Main Engine Action"] = d["TPC Decision"]
     except Exception:
         pass
-
     return d
 
 if "build_kproj_table" in globals():
-    _prev_lahr_build_kproj_table = build_kproj_table
+    _prev_tpc_build_kproj_table = build_kproj_table
     def build_kproj_table(board):
-        df = _prev_lahr_build_kproj_table(board)
+        df = _prev_tpc_build_kproj_table(board)
         try:
-            return _lahr_apply(df)
+            return _tpc_apply(df)
         except Exception:
             return df
 
-def render_line_aware_hit_rate_panel():
-    st.markdown("### 📈 Line-Aware Hit Rate Engine")
-    st.caption("Calculates how often each pitcher cleared TODAY'S current line using all embedded game logs from Opening Day. Lines do not have to be the same historically.")
+def render_true_projection_calibration_panel():
+    st.markdown("### 🎯 True Projection Calibration Test")
+    st.caption("Uses season logs, current-line hit rate, matchup/opponent hit rate, volume reality, soft ceiling clamp, and thin-edge PASS filter.")
     try:
-        st.session_state["use_line_aware_hit_rate_projection"] = st.toggle(
-            "Use Line-Aware Hit Rate Projection",
-            value=st.session_state.get("use_line_aware_hit_rate_projection", True),
-            help="ON = K PROJ/Decision include line-aware hit-rate adjustment.",
-            key="use_line_aware_hit_rate_projection_unique"
+        st.session_state["use_true_projection_calibration_test"] = st.toggle(
+            "Use True Projection Calibration Test",
+            value=st.session_state.get("use_true_projection_calibration_test", True),
+            key="use_true_projection_calibration_test_unique"
         )
     except Exception:
         pass
     try:
         df = build_kproj_table(board) if "board" in globals() else pd.DataFrame()
         cols = [c for c in [
-            "Pitcher", "Matchup", "Pre-LineAware K PROJ", "K PROJ",
-            "UD/Line", "Line Aware Final K Edge", "Line Aware Final K Decision",
-            "Line Aware Season Hit Rate %", "Line Aware Season Clears", "Line Aware Season Games",
-            "Line Aware Recent5 Hit Rate %", "Line Aware Band Hit Rate %",
-            "Line Aware Opp Hit Rate %", "Line Aware Opp Games",
-            "Line Aware Hit Rate Adjustment", "Line Aware Hit Rate Label",
-            "Line Aware Last K Results", "Line Aware Hit Rate Reason"
+            "Pitcher", "Matchup", "Pre-TPC K PROJ", "K PROJ", "TPC True K Projection",
+            "UD/Line", "TPC Edge", "TPC Decision", "TPC Adjustment", "TPC Label",
+            "TPC Season Avg K", "TPC Recent5 Avg K", "TPC Recent3 Avg K",
+            "TPC Season Hit Rate %", "TPC Recent5 Hit Rate %", "TPC Opp Hit Rate %",
+            "TPC Season Avg BF", "Exp BF", "Pitcher K%", "Opp K%", "Putaway/Whiff",
+            "TPC Last K Results", "TPC Reason"
         ] if c in df.columns]
         if cols:
             st.dataframe(df[cols], use_container_width=True, hide_index=True)
         else:
-            st.info("Line-aware hit rate will populate after K board builds.")
+            st.info("True Projection Calibration will populate after the K board builds.")
     except Exception as e:
-        st.info(f"Line-aware hit rate waiting: {e}")
+        st.info(f"True Projection Calibration waiting: {e}")
 
-tab_kproj, tab_pitcher_fs, tab_moneyline, tab_mlb30_puller, tab_fs_ud_watcher, tab_iq, tab_30d_learning, tab_learning_lab, tab_calibration, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+
+# =========================
+# TRUE PROJECTION STACK 1.1
+# Version: TRUE_PROJECTION_STACK_1_1_2026_06_14
+#
+# This is the stronger Version 1 test layer.
+# It sits AFTER the original True Projection Calibration layer and makes the final K PROJ
+# use the missing stronger pieces:
+# - Reality Calibration
+# - Stronger Line-Aware Hit Rate weighting
+# - Opponent-specific hit rate
+# - Volume Reality Check
+# - Soft Ceiling Clamp
+# - Better PASS filter
+#
+# It is intentionally capped. It should move more than 0.01 when logs disagree,
+# but it will not blindly force projections to season average.
+# =========================
+TRUE_PROJECTION_STACK_1_1_VERSION = "TRUE_PROJECTION_STACK_1_1_2026_06_14"
+
+def _tps_num(x, default=None):
+    try:
+        if x in (None, "", "—", "WAITING_FOR_UD_LINE", "NL"):
+            return default
+        v = float(x)
+        if pd.isna(v):
+            return default
+        return v
+    except Exception:
+        return default
+
+def _tps_cap(x, lo, hi):
+    try:
+        return max(lo, min(hi, float(x)))
+    except Exception:
+        return 0.0
+
+def _tps_line(row):
+    for c in ["UD/Line", "Line", "line", "K Line", "TPC Current Line"]:
+        v = _tps_num(row.get(c), None)
+        if v is not None:
+            return v
+    return None
+
+def _tps_base(row):
+    # Use TPC output if available, otherwise the current K PROJ.
+    for c in ["TPC True K Projection", "K PROJ", "Final K Projection", "Projection", "Proj"]:
+        v = _tps_num(row.get(c), None)
+        if v is not None:
+            return v
+    return None
+
+def _tps_anchor(row):
+    vals, weights = [], []
+    for c, w in [
+        ("TPC Season Avg K", 0.28),
+        ("TPC Season Median K", 0.17),
+        ("TPC Recent5 Avg K", 0.22),
+        ("TPC Recent3 Avg K", 0.15),
+        ("Season Avg K", 0.08),
+        ("Season Median K", 0.05),
+        ("Opp Hist Avg K", 0.05),
+    ]:
+        v = _tps_num(row.get(c), None)
+        if v is not None:
+            vals.append(v*w); weights.append(w)
+    if not weights:
+        return None
+    return sum(vals)/sum(weights)
+
+def _tps_hit_score(row):
+    vals, weights = [], []
+    for c, w, min_c in [
+        ("TPC Season Hit Rate %", 0.42, "TPC Season Games"),
+        ("TPC Recent5 Hit Rate %", 0.25, "TPC Recent5 Games"),
+        ("TPC Recent3 Hit Rate %", 0.12, None),
+        ("TPC Band Hit Rate %", 0.11, "TPC Band Games"),
+        ("TPC Opp Hit Rate %", 0.10, "TPC Opp Games"),
+    ]:
+        v = _tps_num(row.get(c), None)
+        if v is None:
+            continue
+        if min_c and c != "TPC Season Hit Rate %" and (_tps_num(row.get(min_c), 0) or 0) < 2:
+            continue
+        vals.append(v*w); weights.append(w)
+    if not weights:
+        return None
+    return sum(vals)/sum(weights)
+
+def _tps_support(row):
+    support = 0
+    notes = []
+    for c, threshold, note in [
+        ("TPC Season Avg K", 5.8, "SEASON_AVG"),
+        ("TPC Recent5 Avg K", 5.8, "RECENT5"),
+        ("TPC Recent3 Avg K", 6.0, "RECENT3"),
+        ("Pitcher K%", 25, "K_SKILL"),
+        ("Opp K%", 23, "OPP_K"),
+        ("Putaway/Whiff", 24, "WHIFF"),
+    ]:
+        v = _tps_num(row.get(c), None)
+        if v is not None and v >= threshold:
+            support += 1
+            notes.append(note)
+    hit = _tps_hit_score(row)
+    if hit is not None and hit >= 62:
+        support += 1
+        notes.append("HIT_RATE")
+    return support, "|".join(notes)
+
+def _tps_adjust(row):
+    base = _tps_base(row)
+    if base is None:
+        return None, 0.0, "NO_BASE", ""
+    line = _tps_line(row)
+    anchor = _tps_anchor(row)
+    sample = _tps_num(row.get("TPC Log Sample"), 0) or 0
+    if sample < 3 or anchor is None:
+        return base, 0.0, "NO_LOG_ANCHOR", ""
+
+    hit = _tps_hit_score(row)
+    support, notes = _tps_support(row)
+    adj = 0.0
+    labels = []
+    reasons = [f"base {base:.2f}", f"anchor {anchor:.2f}", f"support {support}:{notes}"]
+    if hit is not None:
+        reasons.append(f"hit {hit:.1f}")
+
+    # 1. Stronger reality calibration toward true log anchor.
+    gap = base - anchor
+    if gap >= 0.55:
+        # Base projection higher than season/recent reality.
+        if support >= 5:
+            adj -= _tps_cap((gap - 0.35) * 0.16, 0.00, 0.32)
+            labels.append("SUPPORTED_LIGHT_TRIM")
+        elif support >= 3:
+            adj -= _tps_cap((gap - 0.30) * 0.24, 0.05, 0.58)
+            labels.append("REALITY_TRIM")
+        else:
+            adj -= _tps_cap((gap - 0.25) * 0.34, 0.10, 0.95)
+            labels.append("STRONG_REALITY_TRIM")
+        reasons.append(f"HIGH_GAP_{gap:.2f}")
+    elif gap <= -0.75:
+        # Projection lower than real season/recent profile.
+        if support >= 3:
+            adj += _tps_cap((abs(gap) - 0.35) * 0.22, 0.05, 0.65)
+            labels.append("UNDER_FLOOR_LIFT")
+        else:
+            adj += _tps_cap((abs(gap) - 0.45) * 0.14, 0.03, 0.35)
+            labels.append("SMALL_UNDER_LIFT")
+        reasons.append(f"LOW_GAP_{gap:.2f}")
+
+    # 2. Current-line hit rate makes decision/projection move meaningfully.
+    if line is not None and hit is not None:
+        edge = base - line
+        if edge >= 1.0 and hit < 45:
+            adj -= 0.42
+            labels.append("HIT_RATE_STRONG_OVER_CONFLICT")
+        elif edge >= 0.65 and hit < 52:
+            adj -= 0.28
+            labels.append("HIT_RATE_OVER_CONFLICT")
+        elif edge <= 0.35 and hit >= 68:
+            adj += 0.32
+            labels.append("HIT_RATE_OVER_SUPPORT")
+        elif edge >= 0.35 and hit >= 72:
+            adj += 0.18
+            labels.append("HIT_RATE_CONFIRMS")
+        elif -0.25 < edge < 0.70 and hit <= 35:
+            adj -= 0.25
+            labels.append("HIT_RATE_UNDER_SUPPORT")
+
+    # 3. Opponent-specific hit rate boost/tax when sample exists.
+    opp_rate = _tps_num(row.get("TPC Opp Hit Rate %"), None)
+    opp_games = _tps_num(row.get("TPC Opp Games"), 0) or 0
+    if opp_rate is not None and opp_games >= 1 and line is not None:
+        edge = base - line
+        if edge > 0 and opp_rate < 40:
+            adj -= 0.18
+            labels.append("OPP_HIT_RATE_TAX")
+        elif edge < 0.65 and opp_rate >= 67:
+            adj += 0.16
+            labels.append("OPP_HIT_RATE_SUPPORT")
+
+    # 4. Volume reality check.
+    exp_bf = _tps_num(row.get("Exp BF"), None)
+    bf_vals = []
+    for c in ["TPC Season Avg BF", "TPC Recent5 Avg BF", "Season Avg BF"]:
+        v = _tps_num(row.get(c), None)
+        if v is not None:
+            bf_vals.append(v)
+    if exp_bf is not None and bf_vals:
+        bf_anchor = sum(bf_vals)/len(bf_vals)
+        bf_gap = exp_bf - bf_anchor
+        if bf_gap >= 2.5:
+            adj -= _tps_cap((bf_gap - 1.8) * 0.055, 0.06, 0.34)
+            labels.append("VOLUME_REALITY_TRIM")
+            reasons.append(f"BF_GAP_{bf_gap:.1f}")
+        elif bf_gap <= -3.0 and support >= 3:
+            adj += _tps_cap((abs(bf_gap)-2.0) * 0.035, 0.04, 0.22)
+            labels.append("VOLUME_FLOOR_LIFT")
+
+    # 5. Soft ceiling clamp: prevents unrealistic upside when profile/hit rate disagree.
+    projected = base + adj
+    if line is not None:
+        max_allowed = anchor + (1.35 if support >= 6 else 1.05 if support >= 4 else 0.75 if support >= 2 else 0.45)
+        if hit is not None and hit >= 70:
+            max_allowed += 0.25
+        if hit is not None and hit < 45:
+            max_allowed -= 0.15
+        if projected > max_allowed and projected - line >= 1.35:
+            cut = min(projected - max_allowed, 0.75)
+            adj -= cut
+            labels.append("SOFT_CEILING_CLAMP")
+            reasons.append(f"CEILING_{max_allowed:.2f}")
+
+    # Caps keep the engine safe.
+    adj = round(_tps_cap(adj, -1.20, 0.90), 2)
+    final = round(base + adj, 2)
+
+    # Avoid violent side flips.
+    if line is not None:
+        old_edge = base - line
+        new_edge = final - line
+        if old_edge > 0.35 and new_edge < -0.25:
+            final = round(line - 0.20, 2)
+            adj = round(final - base, 2)
+            labels.append("SOFTEN_OVER_TO_UNDER_FLIP")
+        elif old_edge < -0.35 and new_edge > 0.25:
+            final = round(line + 0.20, 2)
+            adj = round(final - base, 2)
+            labels.append("SOFTEN_UNDER_TO_OVER_FLIP")
+
+    return final, adj, "|".join(labels) if labels else "TPS_NO_CHANGE", "; ".join(reasons)
+
+def _tps_decision(row, proj):
+    line = _tps_line(row)
+    if proj is None:
+        return "NO_PROJECTION", ""
+    if line is None:
+        return "NO_UD_LINE", ""
+    edge = round(proj - line, 2)
+    hit = _tps_hit_score(row)
+
+    # Better PASS rules.
+    if -0.70 < edge < 0.70:
+        return "🚫 PASS — TRUE EDGE THIN", edge
+    if edge > 0 and hit is not None and hit < 45 and edge < 1.45:
+        return "🚫 PASS — HIT RATE CONFLICT", edge
+    if edge < 0 and hit is not None and hit > 62 and abs(edge) < 1.25:
+        return "🚫 PASS — UNDER HIT RATE CONFLICT", edge
+
+    if edge >= 1.35:
+        return "🔥 OVER", edge
+    if edge >= 0.70:
+        return "⚠️ OVER LEAN", edge
+    if edge <= -1.35:
+        return "🔥 UNDER", edge
+    if edge <= -0.70:
+        return "⚠️ UNDER LEAN", edge
+    return "🚫 PASS — TRUE EDGE THIN", edge
+
+def _tps_apply(df):
+    if df is None or df.empty:
+        return df
+    d = df.copy()
+    finals, adjs, labels, reasons, decisions, edges = [], [], [], [], [], []
+    for _, rr in d.iterrows():
+        row = rr.to_dict()
+        final, adj, label, reason = _tps_adjust(row)
+        dec, edge = _tps_decision(row, final)
+        finals.append(final if final is not None else "")
+        adjs.append(adj)
+        labels.append(label)
+        reasons.append(reason)
+        decisions.append(dec)
+        edges.append(edge)
+
+    d["TPS Final K Projection"] = finals
+    d["TPS Adjustment"] = adjs
+    d["TPS Label"] = labels
+    d["TPS Reason"] = reasons
+    d["TPS Edge"] = edges
+    d["TPS Decision"] = decisions
+    d["TPS Version"] = TRUE_PROJECTION_STACK_1_1_VERSION
+
+    try:
+        if bool(st.session_state.get("use_true_projection_stack_1_1", True)):
+            if "K PROJ" in d.columns:
+                d["Pre-TPS K PROJ"] = d["K PROJ"]
+                d["K PROJ"] = d["TPS Final K Projection"]
+            if "Decision" in d.columns:
+                d["Pre-TPS Decision"] = d["Decision"]
+                d["Decision"] = d["TPS Decision"]
+            if "Edge Gap" in d.columns:
+                d["Pre-TPS Edge Gap"] = d["Edge Gap"]
+                d["Edge Gap"] = d["TPS Edge"]
+            if "Main Engine Action" in d.columns:
+                d["Pre-TPS Main Engine Action"] = d["Main Engine Action"]
+                d["Main Engine Action"] = d["TPS Decision"]
+    except Exception:
+        pass
+    return d
+
+if "build_kproj_table" in globals():
+    _prev_tps_build_kproj_table = build_kproj_table
+    def build_kproj_table(board):
+        df = _prev_tps_build_kproj_table(board)
+        try:
+            return _tps_apply(df)
+        except Exception:
+            return df
+
+def render_true_projection_stack_1_1_panel():
+    st.markdown("### 🎯 True Projection Stack 1.1")
+    st.caption("Stronger final projection layer: reality calibration + line-aware hit rate + opponent hit rate + volume reality + ceiling clamp.")
+    try:
+        st.session_state["use_true_projection_stack_1_1"] = st.toggle(
+            "Use True Projection Stack 1.1",
+            value=st.session_state.get("use_true_projection_stack_1_1", True),
+            key="use_true_projection_stack_1_1_unique"
+        )
+    except Exception:
+        pass
+    try:
+        df = build_kproj_table(board) if "board" in globals() else pd.DataFrame()
+        cols = [c for c in [
+            "Pitcher","Matchup","Pre-TPS K PROJ","K PROJ","TPS Final K Projection","UD/Line",
+            "TPS Edge","TPS Decision","TPS Adjustment","TPS Label",
+            "TPC Season Avg K","TPC Recent5 Avg K","TPC Season Hit Rate %",
+            "TPC Recent5 Hit Rate %","TPC Opp Hit Rate %","TPC Season Avg BF","Exp BF",
+            "TPS Reason"
+        ] if c in df.columns]
+        if cols:
+            st.dataframe(df[cols], use_container_width=True, hide_index=True)
+        else:
+            st.info("True Projection Stack 1.1 will populate after the K board builds.")
+    except Exception as e:
+        st.info(f"True Projection Stack waiting: {e}")
+
+
+# =========================
+# WIN-RATE STABILITY STACK 1.2
+# Version: WIN_RATE_STABILITY_STACK_1_2_2026_06_14
+# Conservative post-slate layer after 15-11 review.
+# Adds: ace/veteran leash, volume reality, projection reality calibration,
+# opponent hit-rate weighting, lineup/matchup K environment, and ML gate helper.
+# =========================
+WIN_RATE_STABILITY_STACK_VERSION = "WIN_RATE_STABILITY_STACK_1_2_2026_06_14"
+
+def _wrs_num(x, default=None):
+    try:
+        if x in (None, "", "—", "WAITING_FOR_UD_LINE", "NL"):
+            return default
+        v = float(x)
+        if pd.isna(v):
+            return default
+        return v
+    except Exception:
+        return default
+
+def _wrs_cap(x, lo, hi):
+    try:
+        return max(lo, min(hi, float(x)))
+    except Exception:
+        return 0.0
+
+def _wrs_line(row):
+    for c in ["UD/Line", "Line", "line", "K Line", "TPC Current Line"]:
+        v = _wrs_num(row.get(c), None)
+        if v is not None:
+            return v
+    return None
+
+def _wrs_base(row):
+    for c in ["TPS Final K Projection", "TPC True K Projection", "K PROJ", "Final K Projection", "Projection", "Proj"]:
+        v = _wrs_num(row.get(c), None)
+        if v is not None:
+            return v
+    return None
+
+def _wrs_anchor(row):
+    vals, weights = [], []
+    for c, w in [
+        ("TPC Season Avg K", 0.26), ("TPC Season Median K", 0.16),
+        ("TPC Recent5 Avg K", 0.22), ("TPC Recent3 Avg K", 0.14),
+        ("Season Avg K", 0.08), ("Season Median K", 0.05), ("Opp Hist Avg K", 0.09),
+    ]:
+        v = _wrs_num(row.get(c), None)
+        if v is not None:
+            vals.append(v*w); weights.append(w)
+    return None if not weights else sum(vals)/sum(weights)
+
+def _wrs_hit_score(row):
+    vals, weights = [], []
+    for c, w, min_c in [
+        ("TPC Season Hit Rate %", 0.38, "TPC Season Games"),
+        ("TPC Recent5 Hit Rate %", 0.24, "TPC Recent5 Games"),
+        ("TPC Recent3 Hit Rate %", 0.12, None),
+        ("TPC Band Hit Rate %", 0.10, "TPC Band Games"),
+        ("TPC Opp Hit Rate %", 0.16, "TPC Opp Games"),
+    ]:
+        v = _wrs_num(row.get(c), None)
+        if v is None:
+            continue
+        if min_c and c != "TPC Season Hit Rate %" and (_wrs_num(row.get(min_c), 0) or 0) < 2:
+            continue
+        vals.append(v*w); weights.append(w)
+    return None if not weights else sum(vals)/sum(weights)
+
+def _wrs_support(row):
+    support, notes = 0, []
+    for c, threshold, note in [
+        ("TPC Season Avg K", 5.8, "SEASON_AVG"),
+        ("TPC Recent5 Avg K", 5.8, "RECENT5"),
+        ("TPC Recent3 Avg K", 6.0, "RECENT3"),
+        ("Pitcher K%", 25, "K_SKILL"),
+        ("Opp K%", 23, "OPP_K"),
+        ("Putaway/Whiff", 24, "WHIFF"),
+    ]:
+        v = _wrs_num(row.get(c), None)
+        if v is not None and v >= threshold:
+            support += 1; notes.append(note)
+    hit = _wrs_hit_score(row)
+    if hit is not None and hit >= 62:
+        support += 1; notes.append("HIT_RATE")
+    opp_rate = _wrs_num(row.get("TPC Opp Hit Rate %"), None)
+    opp_games = _wrs_num(row.get("TPC Opp Games"), 0) or 0
+    if opp_rate is not None and opp_games >= 1 and opp_rate >= 65:
+        support += 1; notes.append("OPP_HISTORY")
+    return support, "|".join(notes)
+
+def _wrs_ace_score(row):
+    score, notes = 0, []
+    for c, threshold, pts, note in [
+        ("Pitcher K%", 27, 2, "ELITE_K"),
+        ("Pitcher K%", 24, 1, "GOOD_K"),
+        ("TPC Season Avg K", 6.0, 1, "SEASON_K"),
+        ("TPC Recent5 Avg K", 6.0, 1, "RECENT_K"),
+        ("TPC Season Avg IP", 5.7, 2, "IP_TRUST"),
+        ("TPC Season Avg IP", 5.2, 1, "IP_OK"),
+        ("TPC Season Avg BF", 23, 1, "BF_TRUST"),
+        ("TPC Season Avg Pitch Count", 92, 1, "PITCH_COUNT_TRUST"),
+    ]:
+        v = _wrs_num(row.get(c), None)
+        if v is not None and v >= threshold:
+            score += pts; notes.append(note)
+            if c == "Pitcher K%" and threshold == 27:
+                break
+            if c == "TPC Season Avg IP" and threshold == 5.7:
+                pass
+    hit = _wrs_hit_score(row)
+    if hit is not None and hit >= 60:
+        score += 1; notes.append("HIT_RATE_OK")
+    return score, "|".join(notes)
+
+def _wrs_adjust(row):
+    base = _wrs_base(row)
+    if base is None:
+        return None, 0.0, "NO_BASE", ""
+    line = _wrs_line(row)
+    anchor = _wrs_anchor(row)
+    hit = _wrs_hit_score(row)
+    support, support_notes = _wrs_support(row)
+    ace_score, ace_notes = _wrs_ace_score(row)
+
+    adj, labels = 0.0, []
+    reasons = [f"base {base:.2f}", f"support {support}:{support_notes}", f"ace {ace_score}:{ace_notes}"]
+    if anchor is not None: reasons.append(f"anchor {anchor:.2f}")
+    if hit is not None: reasons.append(f"hit {hit:.1f}")
+
+    # Ace/veteran leash + volume reality.
+    exp_ip = _wrs_num(row.get("IP Projection"), _wrs_num(row.get("Projected IP"), None))
+    exp_bf = _wrs_num(row.get("Exp BF"), None)
+    season_ip = _wrs_num(row.get("TPC Season Avg IP"), None)
+    season_bf = _wrs_num(row.get("TPC Season Avg BF"), _wrs_num(row.get("Season Avg BF"), None))
+    recent_bf = _wrs_num(row.get("TPC Recent5 Avg BF"), None)
+
+    if exp_ip is not None and season_ip is not None:
+        ip_gap = season_ip - exp_ip
+        if ip_gap >= 1.0 and ace_score >= 4:
+            adj += _wrs_cap((ip_gap - 0.55) * 0.18, 0.08, 0.45)
+            labels.append("ACE_LEASH_IP_LIFT"); reasons.append(f"IP_GAP_{ip_gap:.2f}")
+        elif ip_gap >= 0.75 and support >= 4:
+            adj += _wrs_cap((ip_gap - 0.45) * 0.12, 0.05, 0.25)
+            labels.append("VOLUME_IP_LIFT"); reasons.append(f"IP_GAP_{ip_gap:.2f}")
+
+    bf_vals = [v for v in [season_bf, recent_bf] if v is not None]
+    if exp_bf is not None and bf_vals:
+        bf_anchor = sum(bf_vals)/len(bf_vals)
+        bf_gap = bf_anchor - exp_bf
+        if bf_gap >= 3.0 and ace_score >= 4:
+            adj += _wrs_cap((bf_gap - 2.0) * 0.045, 0.06, 0.35)
+            labels.append("ACE_BF_VOLUME_LIFT")
+        elif bf_gap <= -3.0:
+            adj -= _wrs_cap((abs(bf_gap) - 2.0) * 0.055, 0.06, 0.35)
+            labels.append("BF_OVERPROJECTION_TRIM")
+
+    # Reality calibration + ceiling protection.
+    if anchor is not None:
+        gap = base - anchor
+        if gap >= 0.80:
+            if support >= 5 and hit is not None and hit >= 62:
+                trim = _wrs_cap((gap - 0.60) * 0.08, 0.00, 0.20)
+                labels.append("SUPPORTED_TINY_TRIM")
+            elif support >= 3:
+                trim = _wrs_cap((gap - 0.45) * 0.18, 0.05, 0.45)
+                labels.append("REALITY_TRIM")
+            else:
+                trim = _wrs_cap((gap - 0.35) * 0.30, 0.10, 0.85)
+                labels.append("STRONG_REALITY_TRIM")
+            adj -= trim; reasons.append(f"HIGH_GAP_{gap:.2f}")
+        elif gap <= -0.95:
+            if support >= 4 or ace_score >= 5:
+                lift = _wrs_cap((abs(gap) - 0.55) * 0.16, 0.05, 0.45)
+                labels.append("REALITY_UNDER_LIFT")
+            else:
+                lift = _wrs_cap((abs(gap) - 0.65) * 0.09, 0.02, 0.20)
+                labels.append("SMALL_UNDER_LIFT")
+            adj += lift; reasons.append(f"LOW_GAP_{gap:.2f}")
+
+    # Current-line hit rate and opponent-specific weighting.
+    if line is not None and hit is not None:
+        edge = base - line
+        if edge >= 1.0 and hit < 45:
+            adj -= 0.32; labels.append("HIT_RATE_OVER_CONFLICT")
+        elif edge >= 0.65 and hit < 52:
+            adj -= 0.20; labels.append("HIT_RATE_WEAK_OVER")
+        elif edge <= 0.35 and hit >= 68 and (support >= 3 or ace_score >= 4):
+            adj += 0.22; labels.append("HIT_RATE_OVER_SUPPORT")
+        elif edge >= 0.35 and hit >= 72:
+            adj += 0.10; labels.append("HIT_RATE_CONFIRM")
+
+        opp_rate = _wrs_num(row.get("TPC Opp Hit Rate %"), None)
+        opp_games = _wrs_num(row.get("TPC Opp Games"), 0) or 0
+        if opp_rate is not None and opp_games >= 1:
+            if edge > 0 and opp_rate < 40:
+                adj -= 0.14; labels.append("OPP_HIT_RATE_TAX")
+            elif edge < 0.70 and opp_rate >= 67:
+                adj += 0.12; labels.append("OPP_HIT_RATE_SUPPORT")
+
+    # Matchup K environment.
+    opp_k = _wrs_num(row.get("Opp K%"), None)
+    pitcher_k = _wrs_num(row.get("Pitcher K%"), None)
+    whiff = _wrs_num(row.get("Putaway/Whiff"), None)
+    if opp_k is not None and pitcher_k is not None:
+        if opp_k >= 24 and pitcher_k >= 25:
+            adj += 0.12; labels.append("MATCHUP_K_ENV_PLUS")
+        elif opp_k <= 19 and pitcher_k < 27:
+            adj -= 0.14; labels.append("MATCHUP_CONTACT_TAX")
+    if whiff is not None and whiff >= 27 and support >= 4:
+        adj += 0.08; labels.append("WHIFF_PLUS")
+
+    # Soft ceiling clamp after all context.
+    projected = base + adj
+    if line is not None and anchor is not None:
+        max_allowed = anchor + (1.45 if ace_score >= 6 else 1.20 if support >= 5 else 0.95 if support >= 3 else 0.55)
+        if hit is not None and hit >= 70: max_allowed += 0.25
+        if hit is not None and hit < 45: max_allowed -= 0.15
+        if projected > max_allowed and projected - line >= 1.40:
+            cut = min(projected - max_allowed, 0.40 if ace_score >= 6 else 0.65)
+            adj -= cut; labels.append("SOFT_CEILING_CLAMP"); reasons.append(f"CEILING_{max_allowed:.2f}")
+
+    adj = round(_wrs_cap(adj, -1.10, 0.90), 2)
+    final = round(base + adj, 2)
+
+    # Avoid violent side flips.
+    if line is not None:
+        old_edge, new_edge = base - line, final - line
+        if old_edge > 0.35 and new_edge < -0.25:
+            final = round(line - 0.20, 2); adj = round(final - base, 2); labels.append("SOFTEN_OVER_TO_UNDER_FLIP")
+        elif old_edge < -0.35 and new_edge > 0.25:
+            final = round(line + 0.20, 2); adj = round(final - base, 2); labels.append("SOFTEN_UNDER_TO_OVER_FLIP")
+
+    return final, adj, "|".join(labels) if labels else "WRS_NO_CHANGE", "; ".join(reasons)
+
+def _wrs_decision(row, proj):
+    line = _wrs_line(row)
+    if proj is None: return "NO_PROJECTION", ""
+    if line is None: return "NO_UD_LINE", ""
+    edge = round(proj - line, 2)
+    hit = _wrs_hit_score(row)
+    if -0.70 < edge < 0.70:
+        return "🚫 PASS — TRUE EDGE THIN", edge
+    if edge > 0 and hit is not None and hit < 45 and edge < 1.45:
+        return "🚫 PASS — HIT RATE CONFLICT", edge
+    if edge < 0 and hit is not None and hit > 62 and abs(edge) < 1.25:
+        return "🚫 PASS — UNDER HIT RATE CONFLICT", edge
+    if edge >= 1.35: return "🔥 OVER", edge
+    if edge >= 0.70: return "⚠️ OVER LEAN", edge
+    if edge <= -1.35: return "🔥 UNDER", edge
+    if edge <= -0.70: return "⚠️ UNDER LEAN", edge
+    return "🚫 PASS — TRUE EDGE THIN", edge
+
+def _wrs_apply(df):
+    if df is None or df.empty:
+        return df
+    d = df.copy()
+    finals, adjs, labels, reasons, decisions, edges = [], [], [], [], [], []
+    for _, rr in d.iterrows():
+        row = rr.to_dict()
+        final, adj, label, reason = _wrs_adjust(row)
+        dec, edge = _wrs_decision(row, final)
+        finals.append(final if final is not None else "")
+        adjs.append(adj); labels.append(label); reasons.append(reason)
+        decisions.append(dec); edges.append(edge)
+
+    d["WRS Final K Projection"] = finals
+    d["WRS Adjustment"] = adjs
+    d["WRS Label"] = labels
+    d["WRS Reason"] = reasons
+    d["WRS Edge"] = edges
+    d["WRS Decision"] = decisions
+    d["WRS Version"] = WIN_RATE_STABILITY_STACK_VERSION
+
+    try:
+        if bool(st.session_state.get("use_win_rate_stability_stack", True)):
+            if "K PROJ" in d.columns:
+                d["Pre-WRS K PROJ"] = d["K PROJ"]
+                d["K PROJ"] = d["WRS Final K Projection"]
+            if "Decision" in d.columns:
+                d["Pre-WRS Decision"] = d["Decision"]
+                d["Decision"] = d["WRS Decision"]
+            if "Edge Gap" in d.columns:
+                d["Pre-WRS Edge Gap"] = d["Edge Gap"]
+                d["Edge Gap"] = d["WRS Edge"]
+            if "Main Engine Action" in d.columns:
+                d["Pre-WRS Main Engine Action"] = d["Main Engine Action"]
+                d["Main Engine Action"] = d["WRS Decision"]
+    except Exception:
+        pass
+    return d
+
+if "build_kproj_table" in globals():
+    _prev_wrs_build_kproj_table = build_kproj_table
+    def build_kproj_table(board):
+        df = _prev_wrs_build_kproj_table(board)
+        try:
+            return _wrs_apply(df)
+        except Exception:
+            return df
+
+def render_win_rate_stability_stack_panel():
+    st.markdown("### 🧠 Win-Rate Stability Stack 1.2")
+    st.caption("Ace/veteran leash + volume reality + projection calibration + opponent hit rate + matchup K environment.")
+    try:
+        st.session_state["use_win_rate_stability_stack"] = st.toggle(
+            "Use Win-Rate Stability Stack 1.2",
+            value=st.session_state.get("use_win_rate_stability_stack", True),
+            key="use_win_rate_stability_stack_unique"
+        )
+    except Exception:
+        pass
+    try:
+        df = build_kproj_table(board) if "board" in globals() else pd.DataFrame()
+        cols = [c for c in [
+            "Pitcher","Matchup","Pre-WRS K PROJ","K PROJ","WRS Final K Projection","UD/Line",
+            "WRS Edge","WRS Decision","WRS Adjustment","WRS Label",
+            "TPC Season Avg K","TPC Recent5 Avg K","TPC Season Hit Rate %",
+            "TPC Recent5 Hit Rate %","TPC Opp Hit Rate %","TPC Season Avg IP",
+            "TPC Season Avg BF","Exp BF","Pitcher K%","Opp K%","Putaway/Whiff","WRS Reason"
+        ] if c in df.columns]
+        if cols:
+            st.dataframe(df[cols], use_container_width=True, hide_index=True)
+        else:
+            st.info("Win-Rate Stability Stack will populate after K board builds.")
+    except Exception as e:
+        st.info(f"Win-Rate Stability Stack waiting: {e}")
+
+MONEYLINE_CONFIDENCE_GATE_1_2_VERSION = "MONEYLINE_CONFIDENCE_GATE_1_2_2026_06_14"
+
+def apply_moneyline_confidence_gate_1_2_df(df):
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    d = df.copy()
+    scores, gates = [], []
+    for _, rr in d.iterrows():
+        row = {str(k).lower(): v for k, v in rr.to_dict().items()}
+        score = 50
+        for k, v in row.items():
+            if "run diff" in k or "run differential" in k or "score edge" in k:
+                x = abs(_wrs_num(v, 0) or 0)
+                score += 20 if x >= 1.2 else 10 if x >= 0.65 else -12 if x < 0.35 else 0
+                break
+        for k, v in row.items():
+            if "ml edge" in k or ("edge" in k and "%" in k):
+                x = abs(_wrs_num(v, 0) or 0)
+                score += 16 if x >= 8 else 8 if x >= 4 else -10 if x < 2 else 0
+                break
+        status_text = " ".join(str(v).lower() for k, v in row.items() if "status" in k or "grade" in k)
+        if "playable" in status_text or "edge" in status_text:
+            score += 8
+        if "pass" in status_text:
+            score -= 8
+        score = int(max(0, min(100, score)))
+        gate = "ML_PLAY_CONFIDENT" if score >= 72 else "ML_LEAN_ONLY" if score >= 60 else "ML_PASS_WEAK_EDGE"
+        scores.append(score); gates.append(gate)
+    d["ML Gate Score 1.2"] = scores
+    d["ML Gate 1.2"] = gates
+    d["ML Gate Version 1.2"] = MONEYLINE_CONFIDENCE_GATE_1_2_VERSION
+    return d
+
+
+
+def render_embedded_pitch_log_feed_check_panel():
+    st.markdown("### 🧪 Embedded Pitch Log Feed Check")
+    try:
+        df = _tpc_load_embedded_pitch_logs() if "_tpc_load_embedded_pitch_logs" in globals() else pd.DataFrame()
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            st.success(f"Embedded Pitch.csv loaded: {len(df)} rows")
+            show_cols = [c for c in ["Date", "Pitcher", "Team", "Opponent", "IP", "BF", "Pitch Count", "K"] if c in df.columns]
+            st.dataframe(df[show_cols].tail(10), use_container_width=True, hide_index=True)
+        else:
+            st.error("Embedded Pitch.csv not loaded. Make sure learning_data/Pitch.csv is next to app.py in GitHub.")
+    except Exception as e:
+        st.error(f"Embedded Pitch.csv check failed: {e}")
+
+# =========================
+# LINE-AWARE HIT RATE SMART DISPLAY + CONFIRMATION
+# Version: LINE_AWARE_SMART_CONFIRM_2026_06_14
+#
+# Purpose:
+# - Brings the useful V3 Line-Aware Hit Rate visibility into Stack 1.2.
+# - DOES NOT double-count the main hit-rate logic already used by WRS 1.2.
+# - Adds a small final confirmation/penalty only when current-line hit rate
+#   strongly agrees or strongly conflicts with the final WRS projection.
+# =========================
+LINE_AWARE_SMART_CONFIRM_VERSION = "LINE_AWARE_SMART_CONFIRM_2026_06_14"
+
+def _lash_num(x, default=None):
+    try:
+        if x in (None, "", "—", "WAITING_FOR_UD_LINE", "NL"):
+            return default
+        v = float(x)
+        if pd.isna(v):
+            return default
+        return v
+    except Exception:
+        return default
+
+def _lash_line(row):
+    for c in ["UD/Line", "Line", "line", "K Line", "TPC Current Line"]:
+        v = _lash_num(row.get(c), None)
+        if v is not None:
+            return v
+    return None
+
+def _lash_final_base(row):
+    for c in ["WRS Final K Projection", "TPS Final K Projection", "TPC True K Projection", "K PROJ", "Final K Projection"]:
+        v = _lash_num(row.get(c), None)
+        if v is not None:
+            return v
+    return None
+
+def _lash_hit_score(row):
+    vals, weights = [], []
+    for c, w, min_c in [
+        ("TPC Season Hit Rate %", 0.40, "TPC Season Games"),
+        ("TPC Recent5 Hit Rate %", 0.24, "TPC Recent5 Games"),
+        ("TPC Recent3 Hit Rate %", 0.10, None),
+        ("TPC Band Hit Rate %", 0.10, "TPC Band Games"),
+        ("TPC Opp Hit Rate %", 0.16, "TPC Opp Games"),
+    ]:
+        v = _lash_num(row.get(c), None)
+        if v is None:
+            continue
+        if min_c and c != "TPC Season Hit Rate %" and (_lash_num(row.get(min_c), 0) or 0) < 2:
+            continue
+        vals.append(v*w); weights.append(w)
+    if not weights:
+        return None
+    return sum(vals) / sum(weights)
+
+def _lash_adjust(row):
+    """
+    Small, final hit-rate confirmation only.
+    WRS already uses hit rate; this prevents double-counting.
+    """
+    base = _lash_final_base(row)
+    line = _lash_line(row)
+    hit = _lash_hit_score(row)
+    if base is None or line is None or hit is None:
+        return base, 0.0, "LASH_NO_DATA", ""
+
+    edge = base - line
+    adj = 0.0
+    label = "LASH_NEUTRAL"
+
+    # Only act on strong disagreement/agreement.
+    if edge >= 0.90 and hit < 38:
+        adj = -0.16
+        label = "LASH_STRONG_OVER_CONFLICT"
+    elif edge >= 0.70 and hit < 45:
+        adj = -0.10
+        label = "LASH_OVER_WARNING"
+    elif edge <= 0.30 and hit >= 72:
+        adj = 0.14
+        label = "LASH_STRONG_OVER_SUPPORT"
+    elif edge >= 0.45 and hit >= 76:
+        adj = 0.08
+        label = "LASH_OVER_CONFIRM"
+
+    final = round(base + adj, 2)
+    reason = f"base {base:.2f}; line {line:.1f}; edge {edge:.2f}; line-aware hit score {hit:.1f}"
+    return final, round(adj, 2), label, reason
+
+def _lash_decision(row, proj):
+    line = _lash_line(row)
+    if proj is None:
+        return "NO_PROJECTION", ""
+    if line is None:
+        return "NO_UD_LINE", ""
+    edge = round(proj - line, 2)
+    hit = _lash_hit_score(row)
+
+    if -0.70 < edge < 0.70:
+        return "🚫 PASS — TRUE EDGE THIN", edge
+    if edge > 0 and hit is not None and hit < 42 and edge < 1.45:
+        return "🚫 PASS — LINE HIT CONFLICT", edge
+    if edge < 0 and hit is not None and hit > 65 and abs(edge) < 1.25:
+        return "🚫 PASS — UNDER LINE HIT CONFLICT", edge
+
+    if edge >= 1.35:
+        return "🔥 OVER", edge
+    if edge >= 0.70:
+        return "⚠️ OVER LEAN", edge
+    if edge <= -1.35:
+        return "🔥 UNDER", edge
+    if edge <= -0.70:
+        return "⚠️ UNDER LEAN", edge
+    return "🚫 PASS — TRUE EDGE THIN", edge
+
+def _lash_apply(df):
+    if df is None or df.empty:
+        return df
+    d = df.copy()
+    finals, adjs, labels, reasons, decisions, edges = [], [], [], [], [], []
+    for _, rr in d.iterrows():
+        row = rr.to_dict()
+        final, adj, label, reason = _lash_adjust(row)
+        dec, edge = _lash_decision(row, final)
+        finals.append(final if final is not None else "")
+        adjs.append(adj)
+        labels.append(label)
+        reasons.append(reason)
+        decisions.append(dec)
+        edges.append(edge)
+
+    d["Line-Aware Smart Final K Projection"] = finals
+    d["Line-Aware Smart Adjustment"] = adjs
+    d["Line-Aware Smart Label"] = labels
+    d["Line-Aware Smart Reason"] = reasons
+    d["Line-Aware Smart Edge"] = edges
+    d["Line-Aware Smart Decision"] = decisions
+    d["Line-Aware Smart Version"] = LINE_AWARE_SMART_CONFIRM_VERSION
+
+    try:
+        if bool(st.session_state.get("use_line_aware_smart_confirm", True)):
+            if "K PROJ" in d.columns:
+                d["Pre-LineAwareSmart K PROJ"] = d["K PROJ"]
+                d["K PROJ"] = d["Line-Aware Smart Final K Projection"]
+            if "Decision" in d.columns:
+                d["Pre-LineAwareSmart Decision"] = d["Decision"]
+                d["Decision"] = d["Line-Aware Smart Decision"]
+            if "Edge Gap" in d.columns:
+                d["Pre-LineAwareSmart Edge Gap"] = d["Edge Gap"]
+                d["Edge Gap"] = d["Line-Aware Smart Edge"]
+            if "Main Engine Action" in d.columns:
+                d["Pre-LineAwareSmart Main Engine Action"] = d["Main Engine Action"]
+                d["Main Engine Action"] = d["Line-Aware Smart Decision"]
+    except Exception:
+        pass
+
+    return d
+
+if "build_kproj_table" in globals():
+    _prev_lash_build_kproj_table = build_kproj_table
+    def build_kproj_table(board):
+        df = _prev_lash_build_kproj_table(board)
+        try:
+            return _lash_apply(df)
+        except Exception:
+            return df
+
+def render_line_aware_smart_confirm_panel():
+    st.markdown("### 📈 Line-Aware Hit Rate Smart Confirm")
+    st.caption("V3-style line hit-rate visibility added to Stack 1.2, with only a tiny final confirmation/tax to avoid double-counting.")
+    try:
+        st.session_state["use_line_aware_smart_confirm"] = st.toggle(
+            "Use Line-Aware Smart Confirm",
+            value=st.session_state.get("use_line_aware_smart_confirm", True),
+            key="use_line_aware_smart_confirm_unique"
+        )
+    except Exception:
+        pass
+    try:
+        df = build_kproj_table(board) if "board" in globals() else pd.DataFrame()
+        cols = [c for c in [
+            "Pitcher","Matchup","Pre-LineAwareSmart K PROJ","K PROJ",
+            "UD/Line","Line-Aware Smart Edge","Line-Aware Smart Decision",
+            "TPC Season Hit Rate %","TPC Season Clears","TPC Season Games",
+            "TPC Recent5 Hit Rate %","TPC Recent5 Clears","TPC Recent5 Games",
+            "TPC Band Hit Rate %","TPC Opp Hit Rate %","TPC Opp Games",
+            "Line-Aware Smart Adjustment","Line-Aware Smart Label",
+            "TPC Last K Results","Line-Aware Smart Reason"
+        ] if c in df.columns]
+        if cols:
+            st.dataframe(df[cols], use_container_width=True, hide_index=True)
+        else:
+            st.info("Line-Aware Smart Confirm will populate after K board builds.")
+    except Exception as e:
+        st.info(f"Line-Aware Smart Confirm waiting: {e}")
+
+RESEARCH_HUB_VERSION = "RESEARCH_HUB_V3_40SUPP_IPTEST_2026_06_15"
+
+
+def _rh_norm(x):
+    try:
+        return unicodedata.normalize("NFKD", str(x or "")).encode("ascii", "ignore").decode("ascii").lower().strip()
+    except Exception:
+        return str(x or "").lower().strip()
+
+
+def _rh_num(x, default=None):
+    try:
+        if x is None or x == "":
+            return default
+        if isinstance(x, str):
+            x = x.replace("%", "").replace("+", "").strip()
+        v = float(x)
+        if math.isnan(v):
+            return default
+        return v
+    except Exception:
+        return default
+
+
+def _rh_col(df, names):
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    low = {str(c).lower().strip(): c for c in df.columns}
+    for n in names:
+        if n in df.columns:
+            return n
+        k = str(n).lower().strip()
+        if k in low:
+            return low[k]
+    return None
+
+
+def _rh_logs_df():
+    """Return pitcher season/30d logs loaded in the app. Never calls projections; never changes projections."""
+    try:
+        for key in ["pitcher_season_logs", "pitcher_30_day_logs"]:
+            df = st.session_state.get(key)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                return df.copy()
+    except Exception:
+        pass
+    try:
+        if '_embedded_pitchcsv_df' in globals():
+            df = _embedded_pitchcsv_df()
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                return df.copy()
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+def _rh_board_base_df(board):
+    rows = []
+    fs_lookup = {}
+    try:
+        fsdf = build_pitcher_fs_board(board)
+        if isinstance(fsdf, pd.DataFrame) and not fsdf.empty:
+            for _, r in fsdf.iterrows():
+                fs_lookup[_rh_norm(r.get("Pitcher"))] = r.to_dict()
+    except Exception:
+        fs_lookup = {}
+
+    for p in board or []:
+        name = p.get("pitcher") or p.get("Pitcher") or p.get("Player") or ""
+        side = str(p.get("pick_side") or p.get("Pick") or "").upper()
+        line = _rh_num(p.get("line") or p.get("UD/Line") or p.get("Line"), None)
+        proj = _rh_num(p.get("projection") or p.get("K PROJ") or p.get("Projection"), None)
+        if not side and line is not None and proj is not None:
+            side = "OVER" if proj > line else "UNDER"
+        fsrow = fs_lookup.get(_rh_norm(name), {})
+        rows.append({
+            "Pitcher": name,
+            "Matchup": p.get("matchup") or p.get("Matchup") or "",
+            "Team": p.get("team") or p.get("Team") or p.get("Pitcher Team") or "",
+            "K Line": line,
+            "K Projection": proj,
+            "K Pick": side,
+            "K Edge": None if line is None or proj is None else round(proj - line, 2),
+            "FS Projection": _rh_num(fsrow.get("FS Projection"), None),
+            "IP Projection": _rh_num(p.get("ip_projection") or p.get("IP Projection") or p.get("IP Proj") or p.get("ip_floor"), _rh_num(fsrow.get("IP Projection"), None)),
+            "Raw": p,
+        })
+    return pd.DataFrame(rows)
+
+
+def _rh_current_opponent(matchup, team=""):
+    try:
+        away, home = _slpb_split_matchup(matchup) if '_slpb_split_matchup' in globals() else ("", "")
+    except Exception:
+        away, home = "", ""
+    team = str(team or "").upper()
+    if team and team in away:
+        return home
+    if team and team in home:
+        return away
+    return ""
+
+
+def _rh_pitcher_logs(name):
+    df = _rh_logs_df()
+    if df.empty:
+        return df
+    pcol = _rh_col(df, ["Pitcher", "Player", "Name"])
+    if not pcol:
+        return pd.DataFrame()
+    d = df.copy()
+    d["_rh_name"] = d[pcol].map(_rh_norm)
+    d = d[d["_rh_name"] == _rh_norm(name)].copy()
+    if d.empty:
+        return d
+    date_col = _rh_col(d, ["Date", "Game Date", "game_date"])
+    if date_col:
+        d["_rh_date"] = pd.to_datetime(d[date_col], errors="coerce")
+        d = d.sort_values("_rh_date")
+    for c in d.columns:
+        if str(c).lower().strip() in ["k", "so", "strikeouts", "ip", "bf", "pitch count", "pitches", "er", "r", "h", "bb", "hr", "whip"]:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+    return d
+
+
+def _rh_k_col(d):
+    return _rh_col(d, ["K", "SO", "Strikeouts", "strikeOuts", "Ks"])
+
+def _rh_ip_col(d):
+    return _rh_col(d, ["IP", "Innings", "Innings Pitched", "inningsPitched", "ip"])
+
+
+def _rh_recent_ip_trend(d, ip_projection=None):
+    """Recent IP trend for the Research Hub only. Does not feed V1 projections."""
+    if d is None or getattr(d, "empty", True):
+        return {
+            "Recent IP Trend": "NO DATA",
+            "Last 5 IP": "—",
+            "Last 10 IP": "—",
+            "L5 IP Avg": None,
+            "L10 IP Avg": None,
+            "IP Trend Label": "NO_IP_LOGS",
+        }
+    ipcol = _rh_ip_col(d)
+    if not ipcol:
+        return {
+            "Recent IP Trend": "NO IP COL",
+            "Last 5 IP": "—",
+            "Last 10 IP": "—",
+            "L5 IP Avg": None,
+            "L10 IP Avg": None,
+            "IP Trend Label": "NO_IP_COLUMN",
+        }
+    vals = []
+    for v in d[ipcol].dropna().tolist():
+        n = _rh_num(v, None)
+        if n is not None:
+            vals.append(float(n))
+    if not vals:
+        return {
+            "Recent IP Trend": "NO IP VALUES",
+            "Last 5 IP": "—",
+            "Last 10 IP": "—",
+            "L5 IP Avg": None,
+            "L10 IP Avg": None,
+            "IP Trend Label": "NO_IP_VALUES",
+        }
+    l5 = vals[-5:]
+    l10 = vals[-10:]
+    l5_avg = round(sum(l5) / len(l5), 2) if l5 else None
+    l10_avg = round(sum(l10) / len(l10), 2) if l10 else None
+    ip_projection = _rh_num(ip_projection, None)
+    label = "STABLE"
+    if l5_avg is not None and ip_projection is not None:
+        diff = l5_avg - ip_projection
+        if diff >= 0.85:
+            label = "RECENT LEASH UP"
+        elif diff <= -0.85:
+            label = "RECENT LEASH DOWN"
+        elif len(l5) >= 3 and (max(l5) - min(l5)) >= 2.0:
+            label = "VOLATILE IP"
+    elif len(l5) >= 3 and (max(l5) - min(l5)) >= 2.0:
+        label = "VOLATILE IP"
+    return {
+        "Recent IP Trend": f"L5 {l5_avg} / L10 {l10_avg}",
+        "Last 5 IP": ", ".join([f"{x:g}" for x in l5]),
+        "Last 10 IP": ", ".join([f"{x:g}" for x in l10]),
+        "L5 IP Avg": l5_avg,
+        "L10 IP Avg": l10_avg,
+        "IP Trend Label": label,
+    }
+
+
+def _rh_role_stability_score(d, row, ip_trend=None):
+    """Display-only role stability. It does not alter V1 K/FS/IP projections or decisions."""
+    ip_projection = _rh_num((row or {}).get("IP Projection"), None)
+    score = 50
+    notes = []
+    if d is None or getattr(d, "empty", True):
+        score -= 15
+        notes.append("limited log data")
+    else:
+        score += min(len(d), 12)
+        ipcol = _rh_ip_col(d)
+        vals = []
+        if ipcol:
+            for v in d[ipcol].dropna().tolist()[-10:]:
+                n = _rh_num(v, None)
+                if n is not None:
+                    vals.append(float(n))
+        if vals:
+            l5 = vals[-5:]
+            avg = sum(l5) / len(l5)
+            starter_like = sum(1 for x in l5 if x >= 4.0)
+            deep = sum(1 for x in l5 if x >= 5.0)
+            if starter_like >= 4:
+                score += 18; notes.append("starter workload")
+            elif starter_like <= 2:
+                score -= 18; notes.append("short/swing workload")
+            if deep >= 3:
+                score += 8; notes.append("recent 5+ IP")
+            if len(l5) >= 3 and (max(l5) - min(l5)) >= 2.5:
+                score -= 14; notes.append("volatile leash")
+            if ip_projection is not None:
+                if avg + 0.9 < ip_projection:
+                    score -= 8; notes.append("projection above recent IP")
+                elif avg - 0.9 > ip_projection:
+                    score += 5; notes.append("projection below recent IP")
+        else:
+            score -= 10; notes.append("no recent IP values")
+    raw = row.get("Raw") if isinstance(row, dict) else {}
+    role_text = " ".join([str(raw.get(k, "")) for k in ["Role", "role", "Starter", "starter", "Lineup", "Pitcher Role", "Leash Label"]]) if isinstance(raw, dict) else ""
+    lt = role_text.lower()
+    if any(w in lt for w in ["opener", "bulk", "swing", "spot", "relief", "bullpen"]):
+        score -= 20; notes.append("role warning")
+    if any(w in lt for w in ["confirmed", "starter", "probable"]):
+        score += 8; notes.append("confirmed/probable")
+    score = int(max(0, min(100, round(score))))
+    label = "STABLE STARTER" if score >= 78 else "MOSTLY STABLE" if score >= 63 else "ROLE WATCH" if score >= 48 else "HIGH ROLE RISK"
+    return score, label, "; ".join(notes[:5]) if notes else "normal workload profile"
+
+
+
+def _rh_fs_from_log_row(r):
+    """Estimated UD-style pitcher FS from real log columns when available. Research only."""
+    k = _rh_num(r.get("K") if "K" in r else r.get("SO") if "SO" in r else r.get("Strikeouts"), 0) or 0
+    ip = _rh_num(r.get("IP"), 0) or 0
+    er = _rh_num(r.get("ER") if "ER" in r else r.get("Earned Runs"), 0) or 0
+    # Win/QS actual flags often are not in Pitch.csv. Keep them optional if present.
+    win = 1 if str(r.get("W") or r.get("Win") or "").upper() in ["1", "TRUE", "W", "WIN"] else 0
+    qs = 1 if ip >= 6.0 and er <= 3.0 else 0
+    return round((k * 3.0) + (ip * 3.0) - (er * 3.0) + (win * 5.0) + (qs * 5.0), 2)
+
+
+def _rh_rate(vals, line, side):
+    vals = [_rh_num(v, None) for v in vals]
+    vals = [v for v in vals if v is not None]
+    if line is None or not vals:
+        return "—", None, 0, 0
+    side = str(side or "OVER").upper()
+    if side == "UNDER":
+        hits = sum(1 for v in vals if v < line)
+    else:
+        hits = sum(1 for v in vals if v > line)
+    return f"{hits}/{len(vals)}", round(hits / len(vals) * 100, 1), hits, len(vals)
+
+
+def _rh_same_line_rate(vals, line, side):
+    # With historical prop lines unavailable, use actual outcomes vs today's exact line.
+    return _rh_rate(vals, line, side)
+
+
+def _rh_market_from_board(raw):
+    books = []
+    try:
+        for r in raw.get("prop_rows", []) or []:
+            src = r.get("Source") or r.get("source") or r.get("book") or r.get("Sportsbook") or "Market"
+            ln = _rh_num(r.get("Line") or r.get("line") or r.get("points"), None)
+            if ln is not None:
+                books.append({"Book": str(src), "Line": ln, "Market": r.get("Market") or r.get("market") or "K"})
+    except Exception:
+        pass
+    # Deduplicate same book/line
+    out = []
+    seen = set()
+    for b in books:
+        key = (b["Book"], b["Line"], b["Market"])
+        if key not in seen:
+            seen.add(key); out.append(b)
+    return out
+
+
+def _rh_line_movement(name, current_line):
+    try:
+        hist = load_json(LINE_HISTORY_FILE, {}) if 'LINE_HISTORY_FILE' in globals() else {}
+        key_norm = _rh_norm(name)
+        candidates = []
+        if isinstance(hist, dict):
+            for k, v in hist.items():
+                if key_norm in _rh_norm(k):
+                    candidates.append(v)
+        lines = []
+        for v in candidates:
+            if isinstance(v, list):
+                for item in v:
+                    ln = _rh_num((item or {}).get("line") if isinstance(item, dict) else item, None)
+                    if ln is not None: lines.append(ln)
+            elif isinstance(v, dict):
+                for kk in ["open", "opening_line", "first_line", "line", "current"]:
+                    ln = _rh_num(v.get(kk), None)
+                    if ln is not None: lines.append(ln)
+        if lines:
+            open_line = lines[0]
+            cur = current_line if current_line is not None else lines[-1]
+            return open_line, cur, round(cur - open_line, 2), "REAL_LINE_HISTORY"
+    except Exception:
+        pass
+    return None, current_line, None, "NO_LINE_MOVEMENT_SOURCE"
+
+
+def _rh_profile_for_row(row):
+    name = row.get("Pitcher")
+    line = _rh_num(row.get("K Line"), None)
+    side = row.get("K Pick") or "OVER"
+    matchup = row.get("Matchup") or ""
+    team = row.get("Team") or ""
+    opp = _rh_current_opponent(matchup, team)
+    d = _rh_pitcher_logs(name)
+    kcol = _rh_k_col(d)
+    vals = d[kcol].dropna().astype(float).tolist() if not d.empty and kcol else []
+    ip_trend = _rh_recent_ip_trend(d, row.get("IP Projection"))
+    role_score, role_label, role_note = _rh_role_stability_score(d, row, ip_trend)
+    l5 = vals[-5:]
+    l10 = vals[-10:]
+    l15 = vals[-15:]
+    l5_txt, l5_pct, _, _ = _rh_rate(l5, line, side)
+    l10_txt, l10_pct, _, _ = _rh_rate(l10, line, side)
+    l15_txt, l15_pct, _, _ = _rh_rate(l15, line, side)
+    same_txt, same_pct, _, _ = _rh_same_line_rate(vals, line, side)
+
+    ha_txt = "—"; ha_pct = None; ha_vals = []
+    ha_label = "NO_HOME_AWAY_SPLIT"
+    try:
+        hacol = _rh_col(d, ["Home/Away", "H/A", "home_away"])
+        if hacol and matchup:
+            desired = None
+            away, home = _slpb_split_matchup(matchup) if '_slpb_split_matchup' in globals() else ("", "")
+            t = str(team or "").upper()
+            if t and t in away: desired = "Away"
+            elif t and t in home: desired = "Home"
+            if desired:
+                hd = d[d[hacol].astype(str).str.lower().str.contains(desired.lower(), na=False)]
+                if kcol and not hd.empty:
+                    ha_vals = hd[kcol].dropna().astype(float).tolist()
+                    ha_txt, ha_pct, _, _ = _rh_rate(ha_vals, line, side)
+                    ha_label = desired.upper()
+    except Exception:
+        pass
+
+    h2h_txt = "—"; h2h_pct = None; h2h_vals = []
+    try:
+        ocol = _rh_col(d, ["Opponent", "Opp", "opponent"])
+        if ocol and opp:
+            od = d[d[ocol].astype(str).str.upper().str.contains(str(opp).upper()[:3], na=False)]
+            if kcol and not od.empty:
+                h2h_vals = od[kcol].dropna().astype(float).tolist()
+                h2h_txt, h2h_pct, _, _ = _rh_rate(h2h_vals, line, side)
+    except Exception:
+        pass
+
+    fs_vals = []
+    try:
+        for _, rr in d.tail(10).iterrows():
+            fs_vals.append(_rh_fs_from_log_row(rr.to_dict()))
+    except Exception:
+        pass
+
+    open_line, cur_line, move, move_src = _rh_line_movement(name, line)
+    market_books = _rh_market_from_board(row.get("Raw") or {})
+    market_txt = "—"
+    if market_books:
+        market_txt = ", ".join([f"{b['Book']} {b['Line']}" for b in market_books[:6]])
+
+    # Sync score: support/confirm V1 side. This is display-only; official picks are unchanged.
+    parts = []
+    for pct, weight in [(l5_pct, 18), (l10_pct, 24), (l15_pct, 12), (ha_pct, 14), (h2h_pct, 12), (same_pct, 10)]:
+        if pct is not None:
+            parts.append((pct / 100.0, weight))
+    edge = _rh_num(row.get("K Edge"), None)
+    if edge is not None:
+        agree = 1.0 if (side == "OVER" and edge > 0) or (side == "UNDER" and edge < 0) else 0.35
+        parts.append((agree, 10))
+    if move is not None:
+        # Line move up can support OVER market interest; move down supports UNDER.
+        agree = 1.0 if (side == "OVER" and move > 0) or (side == "UNDER" and move < 0) else 0.45
+        parts.append((agree, 8))
+    if parts:
+        sync = round(sum(v*w for v,w in parts) / max(sum(w for _,w in parts), 1) * 100, 1)
+    else:
+        sync = None
+    label = "NO DATA"
+    if sync is not None:
+        label = "STRONG AGREEMENT" if sync >= 75 else "GOOD AGREEMENT" if sync >= 62 else "MIXED" if sync >= 48 else "AGAINST TREND"
+
+    return {
+        "Pitcher": name,
+        "Matchup": matchup,
+        "K Pick": side,
+        "K Line": line,
+        "K Projection": row.get("K Projection"),
+        "K Edge": row.get("K Edge"),
+        "FS Projection": row.get("FS Projection"),
+        "IP Projection": row.get("IP Projection"),
+        "Recent IP Trend": ip_trend.get("Recent IP Trend"),
+        "Last 5 IP": ip_trend.get("Last 5 IP"),
+        "Last 10 IP": ip_trend.get("Last 10 IP"),
+        "L5 IP Avg": ip_trend.get("L5 IP Avg"),
+        "L10 IP Avg": ip_trend.get("L10 IP Avg"),
+        "IP Trend Label": ip_trend.get("IP Trend Label"),
+        "Role Stability": role_score,
+        "Role Label": role_label,
+        "Role Note": role_note,
+        "Last 5": l5_txt,
+        "Last 5 %": l5_pct,
+        "Last 10": l10_txt,
+        "Last 10 %": l10_pct,
+        "Last 15": l15_txt,
+        "Last 15 %": l15_pct,
+        "Home/Away": ha_txt,
+        "Home/Away %": ha_pct,
+        "Home/Away Label": ha_label,
+        "H2H": h2h_txt,
+        "H2H %": h2h_pct,
+        "Same-Line": same_txt,
+        "Same-Line %": same_pct,
+        "Open Line": open_line,
+        "Current Line": cur_line,
+        "Line Move": move,
+        "Line Move Source": move_src,
+        "Odds Comparison": market_txt,
+        "Sync Score": sync,
+        "Sync Label": label,
+        "Recent Ks": l10,
+        "Recent FS": fs_vals,
+        "H2H Ks": h2h_vals[-10:],
+        "Data Source": "Pitch.csv/session logs + board prop rows",
+        "Version": RESEARCH_HUB_VERSION,
+    }
+
+
+def build_research_hub_table(board):
+    base = _rh_board_base_df(board)
+    if base.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, r in base.iterrows():
+        rows.append(_rh_profile_for_row(r.to_dict()))
+    return pd.DataFrame(rows)
+
+
+def _rh_bar_html(vals, line=None):
+    if not vals:
+        return "<span class='small-muted'>No recent log data loaded</span>"
+    parts = []
+    for v in vals[-10:]:
+        try:
+            good = line is not None and float(v) > float(line)
+            bg = "#163d2a" if good else "#3a2020"
+            border = "#2ecc71" if good else "#ff5555"
+            parts.append(f"<span style='display:inline-block;min-width:34px;text-align:center;margin:3px;padding:7px 6px;border:1px solid {border};border-radius:9px;background:{bg};font-weight:800'>{v:g}</span>")
+        except Exception:
+            pass
+    return "".join(parts)
+
+
+def render_research_hub_tab(board):
+    st.markdown('<div class="section-title-pro">🔎 PROP RESEARCH HUB — K + FS</div>', unsafe_allow_html=True)
+    st.caption("Outlier-style trend layer for V3. Research displays K/FS trends, and also shows the V3 IP-test + 40% suppression notes. Research Hub itself does not overwrite official decisions.")
+    if not board:
+        st.info("Refresh or load the board first.")
+        return
+    df = build_research_hub_table(board)
+    if df.empty:
+        st.warning("No research rows found. Load Season Data / Pitch.csv first, then refresh the board.")
+        return
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Rows", len(df))
+    c2.metric("Strong Sync", int((pd.to_numeric(df.get("Sync Score"), errors="coerce") >= 75).sum()))
+    c3.metric("With L10 Data", int(df.get("Last 10", pd.Series(dtype=str)).astype(str).ne("—").sum()))
+    c4.metric("Role Watch", int((pd.to_numeric(df.get("Role Stability"), errors="coerce") < 63).sum()))
+    c5.metric("Version", RESEARCH_HUB_VERSION.replace("RESEARCH_HUB_", ""))
+
+    cols = [c for c in [
+        "Pitcher", "Matchup", "K Pick", "K Line", "K Projection", "K Edge", "FS Projection", "IP Projection",
+        "Recent IP Trend", "IP Trend Label", "Role Stability", "Role Label",
+        "Last 5", "Last 10", "Last 15", "Home/Away", "H2H", "Same-Line", "Line Move", "Odds Comparison", "Sync Score", "Sync Label"
+    ] if c in df.columns]
+    st.dataframe(df[cols].sort_values(["Sync Score", "K Edge"], ascending=[False, False], na_position="last"), use_container_width=True, hide_index=True)
+
+    st.subheader("Clickable Player Cards")
+    names = df["Pitcher"].dropna().astype(str).tolist()
+    selected = st.selectbox("Open player research card", names, key="research_hub_player_select")
+    rr = df[df["Pitcher"].astype(str) == selected].iloc[0].to_dict()
+    kline = _rh_num(rr.get("K Line"), None)
+    with st.expander(f"{selected} — Full K/FS Research Card", expanded=True):
+        a,b,c,d,e,f,g = st.columns(7)
+        a.metric("K Projection", rr.get("K Projection", "—"))
+        b.metric("K Line", rr.get("K Line", "—"))
+        c.metric("K Edge", rr.get("K Edge", "—"))
+        d.metric("FS Projection", rr.get("FS Projection", "—"))
+        e.metric("Sync", "—" if rr.get("Sync Score") is None else f"{rr.get('Sync Score')}%")
+        f.metric("L5 IP Avg", rr.get("L5 IP Avg", "—"))
+        g.metric("Role", rr.get("Role Stability", "—"))
+        st.markdown(f"**Decision Support:** {rr.get('Sync Label')}  ")
+        st.markdown("**Last 10 K Results**", unsafe_allow_html=True)
+        st.markdown(_rh_bar_html(rr.get("Recent Ks") or [], kline), unsafe_allow_html=True)
+        st.markdown("**Recent Estimated FS Results**", unsafe_allow_html=True)
+        st.markdown(_rh_bar_html(rr.get("Recent FS") or [], rr.get("FS Projection")), unsafe_allow_html=True)
+        st.write({
+            "Last 5": rr.get("Last 5"),
+            "Last 10": rr.get("Last 10"),
+            "Last 15": rr.get("Last 15"),
+            "Home/Away": rr.get("Home/Away"),
+            "Home/Away Label": rr.get("Home/Away Label"),
+            "H2H": rr.get("H2H"),
+            "H2H Ks": rr.get("H2H Ks"),
+            "Same-Line Hit Rate": rr.get("Same-Line"),
+            "Recent IP Trend": rr.get("Recent IP Trend"),
+            "Last 5 IP": rr.get("Last 5 IP"),
+            "Last 10 IP": rr.get("Last 10 IP"),
+            "IP Trend Label": rr.get("IP Trend Label"),
+            "Role Stability": rr.get("Role Stability"),
+            "Role Label": rr.get("Role Label"),
+            "Role Note": rr.get("Role Note"),
+            "Open Line": rr.get("Open Line"),
+            "Current Line": rr.get("Current Line"),
+            "Line Move": rr.get("Line Move"),
+            "Line Move Source": rr.get("Line Move Source"),
+            "Odds Comparison": rr.get("Odds Comparison"),
+            "Data Source": rr.get("Data Source"),
+        })
+        st.info("Use this as a confirmation/downgrade tool. V3 has 40% partial suppression + capped IP-test enabled; the Research Hub itself does not override official decisions.")
+
+tab_kproj, tab_pitcher_fs, tab_research_hub, tab_moneyline, tab_mlb30_puller, tab_fs_ud_watcher, tab_iq, tab_30d_learning, tab_learning_lab, tab_calibration, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "K PROJ / UPSIDE",
     "PITCHER FS",
+    "🔎 RESEARCH HUB",
     "MONEYLINE EDGE",
     "📥 SEASON DATA",
     "🟣 FS UD WATCHER",
@@ -21295,6 +22535,9 @@ with tab_pitcher_fs:
     render_fs_ud_watcher_controls()
 
     render_pitcher_fs_tab(board)
+
+with tab_research_hub:
+    render_research_hub_tab(board)
 
 with tab_moneyline:
     render_moneyline_edge_tab(board, dates)
@@ -21518,8 +22761,24 @@ def build_better_miss_reason_analytics(results):
 with tab5:
     st.markdown('<div class="section-title-pro">After Games — Grade + Learn</div>', unsafe_allow_html=True)
     if st.button("✅ AFTER GAMES — Grade Results + Update Learning", use_container_width=True):
-        graded = grade_finished_games()
-        st.success(f"Graded {graded} finished official snapshots and updated learning.")
+        diag = grade_finished_games_with_diagnostics()
+        graded = diag.get("graded", 0)
+
+        if graded > 0:
+            st.success(f"✅ After-game grading complete: graded {graded} finished official snapshots and updated learning.")
+        else:
+            st.warning("⚠️ After-game grading ran, but graded 0 snapshots.")
+
+        st.write({
+            "Saved snapshots found": diag.get("saved_snapshots"),
+            "Ungraded before grading": diag.get("ungraded_before"),
+            "Already graded before": diag.get("already_graded_before"),
+            "Missing game_pk or pitcher_id": diag.get("missing_game_or_pitcher_id"),
+            "Results before": diag.get("results_before"),
+            "Results after": diag.get("results_after"),
+        })
+        st.caption(f"PICK_LOG: {diag.get('pick_log_path')}")
+        st.caption(f"RESULT_LOG: {diag.get('result_log_path')}")
     results = load_json(RESULT_LOG, [])
     if results:
         df = pd.DataFrame(results)
