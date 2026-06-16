@@ -24725,7 +24725,7 @@ def _v3_ud_hrr_rows():
 # V3 FAST UI: heavy maintenance/debug tabs are hidden from the main workflow.
 # Season data and FS Underdog watcher logic still run through backend/cache paths,
 # but their full debug UIs are not rendered every refresh.
-tab_kproj, tab_pitcher_fs, tab_research_hub, tab_batter_fs, tab_hrr, tab_moneyline, tab_iq, tab_30d_learning, tab_learning_lab, tab_calibration, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab_kproj, tab_pitcher_fs, tab_research_hub, tab_batter_fs, tab_hrr, tab_moneyline, tab_iq, tab_calibration, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "1️⃣ PITCHER K",
     "2️⃣ PITCHER FS",
     "🔎 RESEARCH HUB",
@@ -24733,8 +24733,6 @@ tab_kproj, tab_pitcher_fs, tab_research_hub, tab_batter_fs, tab_hrr, tab_moneyli
     "4️⃣ H+R+RBI",
     "MONEYLINE EDGE",
     "🧠 BASEBALL IQ",
-    "🧠 30D LEARNING IQ",
-    "🧪 LEARNING LAB",
     "CALIBRATION AUDIT",
     "ALL PLAYERS",
     "REAL PROP BOARD",
@@ -24768,12 +24766,6 @@ with tab_moneyline:
 
 with tab_iq:
     render_baseball_iq_tab(board)
-
-with tab_30d_learning:
-    render_30_day_gamelog_learning_iq()
-
-with tab_learning_lab:
-    render_learning_lab_tab(board)
 
 with tab_calibration:
     render_calibration_audit_tab()
