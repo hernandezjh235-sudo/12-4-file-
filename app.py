@@ -8669,14 +8669,8 @@ def render_kpis(picks, bankroll):
       <div class="kpi-box"><div class="kpi-label">Bankroll</div><div class="kpi-value green">${bankroll:,.0f}</div><div class="kpi-sub">{california_now().strftime('%I:%M %p PT')}</div></div>
     </div>
     """, unsafe_allow_html=True)
-    if best:
-        st.markdown(f"""
-        <div class="green-card">
-          <div class="small-muted">Best EV Play On Current Board</div>
-          <div class="big-number green">{best.get('signal')}</div>
-          <div>{best.get('pitcher')} — {best.get('pick_side')} {best.get('line')} Ks | EV {round((best.get('ev') or 0)*100,2)}% | Data {best.get('data_score')}/100</div>
-        </div>
-        """, unsafe_allow_html=True)
+    # Batter-only V3: do not render the old pitcher-K Best EV card here.
+    # Top batter plays are shown in the Batter Upside / Official Plays tabs.
 
 def render_pick_card(p):
     prob = p.get("fair_probability")
@@ -9160,7 +9154,7 @@ if refresh_btn:
 
     st.session_state.loaded_picks = projections
     st.session_state.last_refresh_time = now_iso()
-    st.success(f"Refreshed {len(projections)} pitchers. Nothing officially saved yet.")
+    st.success(f"Refreshed {len(projections)} context rows. Nothing officially saved yet.")
 
 if save_btn:
     if not st.session_state.get("loaded_picks"):
@@ -25839,8 +25833,36 @@ def render_v3_top_batter_plays_board():
             e.metric("Upside Score", rr.get("Upside Score", "—"))
             st.info("Use this board to find the best batter spots first, then check the FS, H+R+RBI, or Home Runs tabs for the full player card and line/edge details.")
 
+
+
+def render_v3_settings_tab():
+    st.markdown('<div class="section-title-pro">⚙️ Settings / Status</div>', unsafe_allow_html=True)
+    st.caption("Batter-only V3 controls and status. V1 remains the pitcher/K benchmark.")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("App", "Batter V3")
+    c2.metric("Brand", "OneWayPickz")
+    c3.metric("Mode", "Batter Only")
+    st.info("Visible tabs: Batter Upside, Batter FS, H+R+RBI, Home Runs, Baseball IQ, Official Plays, Calibration Audit.")
+    st.write({
+        "K engine visible in V3": "No",
+        "Pitcher FS visible in V3": "No",
+        "Research Hub visible in V3": "No",
+        "Moneyline visible in V3": "No",
+        "Batter FS line source": "Underdog when matched; hidden/advanced fallback only",
+        "H+R+RBI line source": "Underdog when matched",
+        "Home Runs": "Projection/probability based; no Underdog line required",
+    })
+    if st.button("🧹 Clear cache / stale saved display", key="v3_settings_clear_cache", use_container_width=True):
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        st.session_state.loaded_picks = []
+        st.session_state.last_refresh_time = None
+        st.success("Cache/session display cleared. Refresh the board again.")
+
 # Clean V3 batter-only tab layout. Removed visible Pitcher K, Pitcher FS, Research Hub, and Moneyline tabs.
-tab_top, tab_batter_fs, tab_hrr, tab_hr, tab_iq, tab_official, tab_calibration = st.tabs([
+tab_top, tab_batter_fs, tab_hrr, tab_hr, tab_iq, tab_official, tab_calibration, tab_settings = st.tabs([
     "🔥 BATTER UPSIDE",
     "1️⃣ BATTER FS",
     "2️⃣ H+R+RBI",
@@ -25848,6 +25870,7 @@ tab_top, tab_batter_fs, tab_hrr, tab_hr, tab_iq, tab_official, tab_calibration =
     "🧠 BASEBALL IQ",
     "✅ OFFICIAL PLAYS",
     "CALIBRATION AUDIT",
+    "⚙️ SETTINGS",
 ])
 
 with tab_top:
@@ -25870,6 +25893,9 @@ with tab_official:
 
 with tab_calibration:
     render_calibration_audit_tab()
+
+with tab_settings:
+    render_v3_settings_tab()
 
 # =========================
 # ML FINAL REFINEMENT PATCH
