@@ -26171,6 +26171,252 @@ def render_v3_batter_official_plays_tab():
     cols=[c for c in ["Player","Market","Team","Opponent","Matchup","Pick","Line","Projection","Edge","Confidence","HR Probability %","HR Grade","Last 5","Last 10","Same-Line","Sync Score","Sync Label","Official Play Filter"] if c in df.columns]
     st.dataframe(df[cols].head(80), use_container_width=True, hide_index=True)
 
+
+
+# =========================
+# V3 ROBUST FS UPSIDE PATCH
+# Ensures FS Projection is populated on Batter Upside even when Underdog FS lines are not live/posting.
+# Also merges projection-only FS rows into the Batter FS tab instead of returning blank FS values.
+# =========================
+V3_ROBUST_FS_UPSIDE_PATCH_VERSION = "V3_ROBUST_FS_UPSIDE_2026_06_17"
+
+try:
+    _v3_before_robust_build_batter_research_table = build_v3_batter_research_table
+except Exception:
+    _v3_before_robust_build_batter_research_table = None
+
+
+def _v3_row_has_projection_value(row):
+    try:
+        for k in ["Projection", "FS Projection", "Projected FS", "Fantasy Projection", "Fantasy Score Projection"]:
+            v = row.get(k) if isinstance(row, dict) else None
+            if _v3_final_num(v, None) is not None:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _v3_projection_col_value(row):
+    """Return a projection from any known FS projection column."""
+    if not isinstance(row, dict):
+        return None
+    for k in ["Projection", "FS Projection", "Projected FS", "Fantasy Projection", "Fantasy Score Projection"]:
+        v = _v3_final_num(row.get(k), None)
+        if v is not None:
+            return v
+    return None
+
+
+def _v3_fs_projection_map_from_logs():
+    """Map normalized player -> FS projection from Opening Day logs for upside board fallback."""
+    out = {}
+    try:
+        fdf = _v3_projection_only_batter_rows("FS")
+        if isinstance(fdf, pd.DataFrame) and not fdf.empty:
+            for _, r in fdf.iterrows():
+                p = str(r.get("Player") or "")
+                key = _v3_final_norm_player(p)
+                proj = _v3_final_num(r.get("Projection"), None)
+                if key and proj is not None:
+                    out[key] = {
+                        "Player": p,
+                        "FS Projection": proj,
+                        "Projected PA": _v3_final_num(r.get("Projected PA"), None),
+                        "Team": r.get("Team"),
+                        "Opponent": r.get("Opponent"),
+                    }
+    except Exception:
+        pass
+    return out
+
+
+def build_v3_batter_research_table(market="FS"):
+    """Robust final builder: posted-line rows first, but FS projection fallback always fills if missing."""
+    stat_col = "FS" if str(market).upper() == "FS" else "HRR"
+    df = pd.DataFrame(); meta = {}
+    if _v3_before_robust_build_batter_research_table is not None:
+        try:
+            result = _v3_before_robust_build_batter_research_table(market)
+            if isinstance(result, tuple):
+                df, meta = result
+            else:
+                df, meta = result, {}
+        except Exception as e:
+            meta = {"status": f"builder failed: {e}"}
+
+    if stat_col == "FS":
+        fallback = _v3_projection_only_batter_rows("FS")
+        if not isinstance(fallback, pd.DataFrame):
+            fallback = pd.DataFrame()
+
+        # If posted-line table is empty, use full projection-only FS table.
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return fallback, {**(meta or {}), "status": "FS projection-only fallback — waiting for posted lines", "matched": len(fallback)}
+
+        # If posted-line table exists but FS projections are blank/missing, merge projection from fallback by player.
+        try:
+            dfx = df.copy()
+            fmap = {}
+            for _, fr in fallback.iterrows():
+                key = _v3_final_norm_player(fr.get("Player"))
+                if key:
+                    fmap[key] = fr.to_dict()
+            proj_vals = []
+            for _, rr in dfx.iterrows():
+                rd = rr.to_dict()
+                cur = _v3_projection_col_value(rd)
+                if cur is None:
+                    fr = fmap.get(_v3_final_norm_player(rd.get("Player")), {})
+                    cur = _v3_final_num(fr.get("Projection"), None)
+                    if cur is not None:
+                        if "Projection" not in dfx.columns:
+                            dfx["Projection"] = None
+                        # set later by index for safety
+                proj_vals.append(cur)
+            if "Projection" not in dfx.columns:
+                dfx["Projection"] = None
+            for i, cur in enumerate(proj_vals):
+                if cur is not None:
+                    dfx.iloc[i, dfx.columns.get_loc("Projection")] = round(float(cur), 2)
+            # Fill PA/team/opponent if missing.
+            for idx, rr in dfx.iterrows():
+                fr = fmap.get(_v3_final_norm_player(rr.get("Player")), {})
+                for col in ["Projected PA", "Team", "Opponent"]:
+                    if col in fr and (col not in dfx.columns or str(dfx.at[idx, col] if col in dfx.columns else "") in ["", "—", "None", "nan"]):
+                        if col not in dfx.columns:
+                            dfx[col] = None
+                        dfx.at[idx, col] = fr.get(col)
+            return dfx, {**(meta or {}), "status": "FS posted-line rows with projection fallback merged", "fallback_rows": len(fallback)}
+        except Exception:
+            return df, meta
+
+    return df, meta
+
+
+def build_v3_batter_upside_board_final():
+    """Final robust upside board. FS projection fills from FS tab rows or directly from logs fallback."""
+    rows = {}
+
+    def getrow(player):
+        key = _v3_final_norm_player(player)
+        if not key:
+            return None
+        if key not in rows:
+            rows[key] = {
+                "Player": str(player),
+                "Projected PA": None,
+                "FS Projection": None,
+                "HRR Projection": None,
+                "HR Probability": None,
+                "Upside Score": 0,
+            }
+        if len(str(player)) > len(str(rows[key].get("Player") or "")):
+            rows[key]["Player"] = str(player)
+        return rows[key]
+
+    # First seed with FS fallback from logs so FS can never stay blank just because lines are not posted.
+    try:
+        fmap = _v3_fs_projection_map_from_logs()
+        for key, fr in fmap.items():
+            d = getrow(fr.get("Player"))
+            if d is None: continue
+            d["FS Projection"] = _v3_final_num(fr.get("FS Projection"), d.get("FS Projection"))
+            if fr.get("Projected PA") is not None:
+                d["Projected PA"] = fr.get("Projected PA")
+            d["Team"] = fr.get("Team", d.get("Team"))
+            d["Opponent"] = fr.get("Opponent", d.get("Opponent"))
+    except Exception:
+        pass
+
+    # Batter FS board / posted-line overlay.
+    try:
+        fs_df, _ = build_v3_batter_research_table("FS")
+        if isinstance(fs_df, pd.DataFrame) and not fs_df.empty:
+            for _, r in fs_df.iterrows():
+                rd = r.to_dict()
+                d = getrow(rd.get("Player"))
+                if d is None: continue
+                fsproj = _v3_projection_col_value(rd)
+                if fsproj is not None:
+                    d["FS Projection"] = fsproj
+                pa = _v3_final_num(rd.get("Projected PA"), None)
+                if pa is not None: d["Projected PA"] = pa
+                d["FS Line"] = rd.get("Line")
+                d["FS Edge"] = rd.get("Edge")
+                d["FS Pick"] = rd.get("Pick")
+                d["Team"] = rd.get("Team", d.get("Team"))
+                d["Opponent"] = rd.get("Opponent", d.get("Opponent"))
+    except Exception:
+        pass
+
+    # H+R+RBI board.
+    try:
+        hrr_df, _ = build_v3_batter_research_table("HRR")
+        if isinstance(hrr_df, pd.DataFrame) and not hrr_df.empty:
+            for _, r in hrr_df.iterrows():
+                rd = r.to_dict()
+                d = getrow(rd.get("Player"))
+                if d is None: continue
+                hrrproj = _v3_final_num(rd.get("Projection"), None)
+                if hrrproj is not None:
+                    d["HRR Projection"] = hrrproj
+                pa = _v3_final_num(rd.get("Projected PA"), None)
+                if pa is not None: d["Projected PA"] = pa
+                d["HRR Line"] = rd.get("Line")
+                d["HRR Edge"] = rd.get("Edge")
+                d["HRR Pick"] = rd.get("Pick")
+                d["Team"] = rd.get("Team", d.get("Team"))
+                d["Opponent"] = rd.get("Opponent", d.get("Opponent"))
+    except Exception:
+        pass
+
+    # Home Run board.
+    try:
+        hr_df, _ = build_v3_home_run_table()
+        if isinstance(hr_df, pd.DataFrame) and not hr_df.empty:
+            for _, r in hr_df.iterrows():
+                rd = r.to_dict()
+                d = getrow(rd.get("Player"))
+                if d is None: continue
+                hp = _v3_final_num(rd.get("HR Probability %"), d.get("HR Probability"))
+                d["HR Probability"] = hp
+                pa = _v3_final_num(rd.get("Projected PA"), None)
+                if pa is not None: d["Projected PA"] = pa
+                d["HR Grade"] = rd.get("HR Grade")
+                d["Team"] = rd.get("Team", d.get("Team"))
+                d["Opponent"] = rd.get("Opponent", d.get("Opponent"))
+    except Exception:
+        pass
+
+    out = []
+    for d in rows.values():
+        fs = _v3_final_num(d.get("FS Projection"), 0) or 0
+        hrr = _v3_final_num(d.get("HRR Projection"), 0) or 0
+        hrp = _v3_final_num(d.get("HR Probability"), 0) or 0
+        pa = _v3_final_num(d.get("Projected PA"), 4.0) or 4.0
+        fs_edge = abs(_v3_final_num(d.get("FS Edge"), 0) or 0)
+        hrr_edge = abs(_v3_final_num(d.get("HRR Edge"), 0) or 0)
+        score = 0
+        score += min(25, max(0, (pa - 3.4) * 13))
+        score += min(25, fs * 1.7)
+        score += min(20, hrr * 7.0)
+        score += min(20, hrp * 0.75)
+        score += min(10, fs_edge * 1.8 + hrr_edge * 5.0)
+        d["Projected PA"] = round(pa, 2) if pa else "—"
+        d["FS Projection"] = round(fs, 2) if fs else "—"
+        d["HRR Projection"] = round(hrr, 2) if hrr else "—"
+        d["HR Probability"] = f"{round(hrp, 1)}%" if hrp else "—"
+        d["Upside Score"] = int(round(max(0, min(100, score))))
+        out.append(d)
+    if not out:
+        return pd.DataFrame(columns=["Player", "Projected PA", "FS Projection", "HRR Projection", "HR Probability", "Upside Score"])
+    df = pd.DataFrame(out)
+    df["_norm"] = df["Player"].map(_v3_final_norm_player)
+    df = df.sort_values("Upside Score", ascending=False).drop_duplicates("_norm", keep="first").drop(columns=["_norm"])
+    return df[["Player", "Projected PA", "FS Projection", "HRR Projection", "HR Probability", "Upside Score"]]
+
+
 # Clean V3 batter-only tab layout. Removed visible Pitcher K, Pitcher FS, Research Hub, and Moneyline tabs.
 tab_top, tab_batter_fs, tab_hrr, tab_hr, tab_iq, tab_official, tab_calibration, tab_settings = st.tabs([
     "🔥 BATTER UPSIDE",
