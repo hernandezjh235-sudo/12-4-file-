@@ -21,7 +21,7 @@ import streamlit as st
 from math import exp, factorial
 from datetime import datetime, timedelta
 
-APP_VERSION = "BATTER PROJECTIONS V3 — ONEWAYPICKZ"
+APP_VERSION = "ONE WAY PICKZ — BATTER PROJECTIONS V3 CLEAN UD LEARNING BUILD"
 
 # =========================
 # V3 TEST PATCH — 40% SUPPRESSION + IP ACCURACY TEST
@@ -26417,13 +26417,407 @@ def build_v3_batter_upside_board_final():
     return df[["Player", "Projected PA", "FS Projection", "HRR Projection", "HR Probability", "Upside Score"]]
 
 
+
+# =========================
+# ONE WAY PICKZ V3 CLEAN UD-ONLY + BATTER LEARNING PATCH
+# - No projection-only clutter: players must have an active Underdog line to show.
+# - Top boards sort strongest plays first.
+# - Batter learning lab reads graded/saved history when available.
+# - Research Hub / Moneyline remain removed from visible V3.
+# =========================
+V3_CLEAN_UD_LEARNING_VERSION = "ONE_WAY_PICKZ_V3_CLEAN_UD_ONLY_LEARNING_2026_06_18"
+
+
+def _v3_is_live_ud_line(v):
+    try:
+        if v is None:
+            return False
+        s = str(v).strip()
+        if s in {"", "—", "-", "None", "nan"}:
+            return False
+        return safe_float(s, None) is not None
+    except Exception:
+        return False
+
+
+def _v3_add_best_hit_rate_column(df):
+    try:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return df
+        d = df.copy()
+        vals = []
+        for _, r in d.iterrows():
+            rd = r.to_dict()
+            best = None
+            for col in ["Same-Line", "Last 10", "Last 15", "Last 5"]:
+                if col in rd:
+                    pct = _v3_best_hit_rate_pct_from_row({col: rd.get(col)})
+                    if pct is not None:
+                        best = pct if best is None else max(best, pct)
+            vals.append(None if best is None else round(float(best), 1))
+        d["Best Hit Rate %"] = vals
+        return d
+    except Exception:
+        return df
+
+
+# Preserve the final pre-clean builder.
+try:
+    _v3_pre_ud_clean_build_batter_research_table = build_v3_batter_research_table
+except Exception:
+    _v3_pre_ud_clean_build_batter_research_table = None
+
+try:
+    _v3_pre_ud_clean_build_home_run_table = build_v3_home_run_table
+except Exception:
+    _v3_pre_ud_clean_build_home_run_table = None
+
+
+def build_v3_batter_research_table(market="FS"):
+    """Strict V3 builder: only players with active Underdog posted lines are shown."""
+    stat_col = "FS" if str(market).upper() == "FS" else "HRR"
+    if _v3_pre_ud_clean_build_batter_research_table is None:
+        return pd.DataFrame(), {"status": "builder unavailable", "mode": "UD_ONLY"}
+    try:
+        result = _v3_pre_ud_clean_build_batter_research_table(market)
+        if isinstance(result, tuple):
+            df, meta = result
+        else:
+            df, meta = result, {}
+    except Exception as e:
+        return pd.DataFrame(), {"status": f"builder failed: {e}", "mode": "UD_ONLY"}
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame(), {**(meta or {}), "status": "No active Underdog lines matched", "mode": "UD_ONLY"}
+
+    d = df.copy()
+    if "Line" not in d.columns:
+        return pd.DataFrame(), {**(meta or {}), "status": "No Underdog Line column found", "mode": "UD_ONLY"}
+
+    # Remove projection-only / waiting-for-line rows.
+    d = d[d["Line"].apply(_v3_is_live_ud_line)].copy()
+    if d.empty:
+        return pd.DataFrame(), {**(meta or {}), "status": "Waiting for active Underdog posted lines", "mode": "UD_ONLY"}
+
+    d = _v3_add_best_hit_rate_column(d)
+
+    # Clean official labels and sort strongest first.
+    if "Edge" in d.columns:
+        d["_abs_edge"] = pd.to_numeric(d["Edge"], errors="coerce").abs().fillna(0)
+    else:
+        d["_abs_edge"] = 0
+    if "Sync Score" in d.columns:
+        d["_sync"] = pd.to_numeric(d["Sync Score"], errors="coerce").fillna(0)
+    else:
+        d["_sync"] = 0
+    if "Best Hit Rate %" in d.columns:
+        d["_hit"] = pd.to_numeric(d["Best Hit Rate %"], errors="coerce").fillna(0)
+    else:
+        d["_hit"] = 0
+
+    d["V3 Board Mode"] = "UNDERDOG_LINE_ONLY"
+    d["Learning Version"] = V3_CLEAN_UD_LEARNING_VERSION
+    d = d.sort_values(["_sync", "_hit", "_abs_edge"], ascending=[False, False, False], na_position="last")
+    d = d.drop(columns=[c for c in ["_sync", "_hit", "_abs_edge"] if c in d.columns], errors="ignore")
+    return d, {**(meta or {}), "status": "Active Underdog lines only", "mode": "UD_ONLY", "matched": len(d)}
+
+
+def build_v3_home_run_table():
+    """Strict HR builder: only HR rows with a real Underdog line are displayed."""
+    if _v3_pre_ud_clean_build_home_run_table is None:
+        return pd.DataFrame(), {"status": "HR builder unavailable", "mode": "UD_ONLY"}
+    try:
+        result = _v3_pre_ud_clean_build_home_run_table()
+        if isinstance(result, tuple):
+            df, meta = result
+        else:
+            df, meta = result, {}
+    except Exception as e:
+        return pd.DataFrame(), {"status": f"HR builder failed: {e}", "mode": "UD_ONLY"}
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame(), {**(meta or {}), "status": "No active HR rows", "mode": "UD_ONLY"}
+    d = df.copy()
+    if "Line" not in d.columns:
+        return pd.DataFrame(), {**(meta or {}), "status": "No HR Underdog line column found", "mode": "UD_ONLY"}
+    d = d[d["Line"].apply(_v3_is_live_ud_line)].copy()
+    if d.empty:
+        return pd.DataFrame(), {**(meta or {}), "status": "No active Underdog HR lines matched", "mode": "UD_ONLY"}
+
+    if "HR Probability %" in d.columns:
+        d["_hrp"] = pd.to_numeric(d["HR Probability %"], errors="coerce").fillna(0)
+    else:
+        d["_hrp"] = 0
+    if "Projected PA" in d.columns:
+        d["_pa"] = pd.to_numeric(d["Projected PA"], errors="coerce").fillna(0)
+    else:
+        d["_pa"] = 0
+    d["V3 Board Mode"] = "UNDERDOG_LINE_ONLY"
+    d["Learning Version"] = V3_CLEAN_UD_LEARNING_VERSION
+    d = d.sort_values(["_hrp", "_pa"], ascending=[False, False], na_position="last")
+    d = d.drop(columns=[c for c in ["_hrp", "_pa"] if c in d.columns], errors="ignore")
+    return d, {**(meta or {}), "status": "Active Underdog HR lines only", "mode": "UD_ONLY", "matched": len(d)}
+
+
+def build_v3_batter_upside_board_final():
+    """Top batter board: only batters with at least one active Underdog line appear."""
+    rows = {}
+
+    def getrow(player):
+        key = _v3_final_norm_player(player)
+        if not key:
+            return None
+        if key not in rows:
+            rows[key] = {
+                "Player": str(player),
+                "Projected PA": None,
+                "FS Projection": None,
+                "FS Line": None,
+                "FS Pick": None,
+                "FS Edge": None,
+                "HRR Projection": None,
+                "HRR Line": None,
+                "HRR Pick": None,
+                "HRR Edge": None,
+                "HR Probability": None,
+                "HR Line": None,
+                "HR Pick": None,
+                "Best Hit Rate %": None,
+                "Upside Score": 0,
+            }
+        if len(str(player)) > len(str(rows[key].get("Player") or "")):
+            rows[key]["Player"] = str(player)
+        return rows[key]
+
+    # Batter FS posted-line rows only.
+    try:
+        fs_df, _ = build_v3_batter_research_table("FS")
+        if isinstance(fs_df, pd.DataFrame) and not fs_df.empty:
+            for _, r in fs_df.iterrows():
+                rd = r.to_dict()
+                d = getrow(rd.get("Player"))
+                if d is None:
+                    continue
+                d["FS Projection"] = _v3_projection_col_value(rd)
+                d["FS Line"] = rd.get("Line")
+                d["FS Edge"] = rd.get("Edge")
+                d["FS Pick"] = rd.get("Pick")
+                d["Projected PA"] = _v3_final_num(rd.get("Projected PA"), d.get("Projected PA"))
+                d["Team"] = rd.get("Team", d.get("Team"))
+                d["Opponent"] = rd.get("Opponent", d.get("Opponent"))
+                d["Best Hit Rate %"] = max(_v3_final_num(d.get("Best Hit Rate %"), 0) or 0, _v3_final_num(rd.get("Best Hit Rate %"), 0) or 0)
+    except Exception:
+        pass
+
+    # H+R+RBI posted-line rows only.
+    try:
+        hrr_df, _ = build_v3_batter_research_table("HRR")
+        if isinstance(hrr_df, pd.DataFrame) and not hrr_df.empty:
+            for _, r in hrr_df.iterrows():
+                rd = r.to_dict()
+                d = getrow(rd.get("Player"))
+                if d is None:
+                    continue
+                d["HRR Projection"] = _v3_final_num(rd.get("Projection"), None)
+                d["HRR Line"] = rd.get("Line")
+                d["HRR Edge"] = rd.get("Edge")
+                d["HRR Pick"] = rd.get("Pick")
+                d["Projected PA"] = _v3_final_num(rd.get("Projected PA"), d.get("Projected PA"))
+                d["Team"] = rd.get("Team", d.get("Team"))
+                d["Opponent"] = rd.get("Opponent", d.get("Opponent"))
+                d["Best Hit Rate %"] = max(_v3_final_num(d.get("Best Hit Rate %"), 0) or 0, _v3_final_num(rd.get("Best Hit Rate %"), 0) or 0)
+    except Exception:
+        pass
+
+    # Home Run posted-line rows only.
+    try:
+        hr_df, _ = build_v3_home_run_table()
+        if isinstance(hr_df, pd.DataFrame) and not hr_df.empty:
+            for _, r in hr_df.iterrows():
+                rd = r.to_dict()
+                d = getrow(rd.get("Player"))
+                if d is None:
+                    continue
+                d["HR Probability"] = _v3_final_num(rd.get("HR Probability %"), d.get("HR Probability"))
+                d["HR Line"] = rd.get("Line")
+                d["HR Pick"] = rd.get("Pick")
+                d["Projected PA"] = _v3_final_num(rd.get("Projected PA"), d.get("Projected PA"))
+                d["Team"] = rd.get("Team", d.get("Team"))
+                d["Opponent"] = rd.get("Opponent", d.get("Opponent"))
+    except Exception:
+        pass
+
+    out = []
+    for d in rows.values():
+        # Strict: must have at least one active posted line.
+        if not any(_v3_is_live_ud_line(d.get(k)) for k in ["FS Line", "HRR Line", "HR Line"]):
+            continue
+        fs = _v3_final_num(d.get("FS Projection"), 0) or 0
+        hrr = _v3_final_num(d.get("HRR Projection"), 0) or 0
+        hrp = _v3_final_num(d.get("HR Probability"), 0) or 0
+        pa = _v3_final_num(d.get("Projected PA"), 4.0) or 4.0
+        fs_edge = abs(_v3_final_num(d.get("FS Edge"), 0) or 0)
+        hrr_edge = abs(_v3_final_num(d.get("HRR Edge"), 0) or 0)
+        hit = _v3_final_num(d.get("Best Hit Rate %"), 0) or 0
+
+        score = 0
+        score += min(25, max(0, (pa - 3.4) * 13))
+        score += min(25, fs * 1.5)
+        score += min(20, hrr * 6.5)
+        score += min(20, hrp * 0.70)
+        score += min(15, fs_edge * 1.7 + hrr_edge * 4.5)
+        score += min(15, max(0, hit - 50) * 0.30)
+        d["Projected PA"] = round(pa, 2) if pa else "—"
+        d["FS Projection"] = round(fs, 2) if fs else "—"
+        d["HRR Projection"] = round(hrr, 2) if hrr else "—"
+        d["HR Probability"] = f"{round(hrp, 1)}%" if hrp else "—"
+        d["Best Hit Rate %"] = round(hit, 1) if hit else "—"
+        d["Upside Score"] = int(round(max(0, min(100, score))))
+        out.append(d)
+
+    if not out:
+        return pd.DataFrame(columns=["Player", "Team", "Opponent", "Projected PA", "FS Projection", "FS Line", "HRR Projection", "HRR Line", "HR Probability", "HR Line", "Best Hit Rate %", "Upside Score"])
+    df = pd.DataFrame(out)
+    df["_norm"] = df["Player"].map(_v3_final_norm_player)
+    df = df.sort_values(["Upside Score", "Best Hit Rate %"], ascending=[False, False], na_position="last").drop_duplicates("_norm", keep="first").drop(columns=["_norm"])
+    cols = ["Player", "Team", "Opponent", "Projected PA", "FS Projection", "FS Line", "FS Pick", "FS Edge", "HRR Projection", "HRR Line", "HRR Pick", "HRR Edge", "HR Probability", "HR Line", "HR Pick", "Best Hit Rate %", "Upside Score"]
+    return df[[c for c in cols if c in df.columns]]
+
+
+def render_v3_top_batter_plays_board():
+    st.markdown('<div class="section-title-pro">🔥 Batter Upside Board — Underdog Lines Only</div>', unsafe_allow_html=True)
+    st.caption("Clean V3 board: only batters with active Underdog lines are shown. Sorted by Upside Score, hit rate, edge, PA, and HR probability.")
+    df = build_v3_batter_upside_board_final()
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        st.info("No active Underdog batter lines matched yet. Refresh after the board posts.")
+        return
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("UD Players", len(df))
+    c2.metric("Top Upside", int(pd.to_numeric(df["Upside Score"], errors="coerce").max()))
+    c3.metric("Avg PA", round(pd.to_numeric(df["Projected PA"], errors="coerce").mean(), 2))
+    c4.metric("Mode", "UD Only")
+    st.dataframe(df.head(80), use_container_width=True, hide_index=True)
+
+    names = df["Player"].dropna().astype(str).tolist()
+    if names:
+        selected = st.selectbox("Open batter upside card", names, key=_v3_unique_widget_key("clean_ud_batter_upside_card_select"))
+        rr = df[df["Player"].astype(str) == selected].iloc[0].to_dict()
+        with st.expander(f"{selected} — Batter Upside Card", expanded=True):
+            a,b,c,d,e = st.columns(5)
+            a.metric("Projected PA", rr.get("Projected PA", "—"))
+            b.metric("FS", f"{rr.get('FS Projection','—')} / Line {rr.get('FS Line','—')}")
+            c.metric("HRR", f"{rr.get('HRR Projection','—')} / Line {rr.get('HRR Line','—')}")
+            d.metric("HR", f"{rr.get('HR Probability','—')} / Line {rr.get('HR Line','—')}")
+            e.metric("Upside Score", rr.get("Upside Score", "—"))
+            st.info("Only active Underdog-line players appear here. Use FS, H+R+RBI, and HR tabs for full cards.")
+
+
+def _v3_load_batter_grade_history():
+    """Best-effort batter graded history loader.
+
+    Uses existing app result logs when available. This is audit-only.
+    """
+    rows = []
+    for path in [
+        os.path.join(STORAGE_DIR, "v3_batter_result_log.json"),
+        os.path.join(STORAGE_DIR, "batter_result_log.json"),
+        os.path.join(STORAGE_DIR, "auto_batter_result_log.json"),
+        RESULT_LOG if "RESULT_LOG" in globals() else None,
+    ]:
+        try:
+            if not path:
+                continue
+            data = load_json(path, [])
+            if isinstance(data, list):
+                rows.extend([r for r in data if isinstance(r, dict)])
+        except Exception:
+            pass
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    # Keep batter-looking markets only when possible.
+    if "Market" in df.columns:
+        m = df["Market"].astype(str).str.upper()
+        df = df[m.str.contains("BATTER|H\\+R\\+RBI|HRR|HOME RUN|FANTASY", regex=True, na=False)]
+    return df
+
+
+def render_v3_batter_learning_lab_tab():
+    st.markdown('<div class="section-title-pro">🧠 Batter Learning Lab — V3</div>', unsafe_allow_html=True)
+    st.caption("Audit-only batter learning: reads saved/graded batter rows when available, and keeps Batter FS / HRR / HR learning separate from V1 pitcher learning.")
+    df = _v3_load_batter_grade_history()
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        st.info("No batter graded history loaded yet. Save and grade batter snapshots to activate FS/HRR/HR learning.")
+        st.write({
+            "Expected modules": ["Batter FS Learning", "H+R+RBI Learning", "HR Probability Learning", "PA / Batting Order Learning", "RHP/LHP Matchup Learning"],
+            "Current board mode": "Underdog posted-line players only",
+            "Safe": "YES — audit only, no projection formulas changed",
+            "Version": V3_CLEAN_UD_LEARNING_VERSION,
+        })
+        return
+
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Loaded Rows", len(df))
+    mcol = _v3_col(df, ["Market", "Prop", "market"])
+    pcol = _v3_col(df, ["Player", "Batter", "Name", "player"])
+    result_col = _v3_col(df, ["Result", "graded_result", "Win/Loss", "Outcome"])
+    if result_col:
+        wr = df[result_col].astype(str).str.upper().isin(["WIN","W","TRUE","✅"]).mean() * 100
+        c2.metric("Logged WR", f"{wr:.1f}%")
+    else:
+        c2.metric("Logged WR", "—")
+    c3.metric("Markets", int(df[mcol].nunique()) if mcol else "—")
+    c4.metric("Mode", "Batter")
+
+    st.markdown("#### Market Learning")
+    if mcol and result_col:
+        d = df.copy()
+        d["_win"] = d[result_col].astype(str).str.upper().isin(["WIN","W","TRUE","✅"]).astype(int)
+        out = d.groupby(mcol).agg(Rows=("_win","count"), Win_Rate=("_win","mean")).reset_index()
+        out["Win_Rate"] = (out["Win_Rate"] * 100).round(1)
+        st.dataframe(out.sort_values("Rows", ascending=False), use_container_width=True, hide_index=True)
+    else:
+        st.info("Market result columns not found yet. Future batter grading will populate this.")
+
+    st.markdown("#### Recent Batter Grade Rows")
+    show_cols = [c for c in ["Date","Player","Market","Pick","Line","Projection","Edge","Actual","Result","graded_result","Projected PA","Actual PA","Lineup Slot","Pitcher Hand"] if c in df.columns]
+    st.dataframe(df[show_cols].tail(100) if show_cols else df.tail(100), use_container_width=True, hide_index=True)
+
+
+def render_v3_settings_tab():
+    st.markdown('<div class="section-title-pro">⚙️ Settings / Status</div>', unsafe_allow_html=True)
+    st.caption("Batter-only V3 controls and status. Clean Underdog-only version.")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("App", "Batter V3")
+    c2.metric("Brand", "ONE WAY PICKZ")
+    c3.metric("Mode", "UD Lines Only")
+    st.info("Visible tabs: Batter Upside, Batter FS, H+R+RBI, Home Runs, Batter Learning Lab, Official Plays, Calibration Audit.")
+    st.write({
+        "K engine visible in V3": "No",
+        "Pitcher FS visible in V3": "No",
+        "Research Hub visible in V3": "No",
+        "Moneyline visible in V3": "No",
+        "Batter FS line source": "Underdog only",
+        "H+R+RBI line source": "Underdog only",
+        "Home Runs": "Underdog line required to display",
+        "Cleanup version": V3_CLEAN_UD_LEARNING_VERSION,
+    })
+    if st.button("🧹 Clear cache / stale saved display", key="v3_settings_clear_cache_clean_ud", use_container_width=True):
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        st.session_state.loaded_picks = []
+        st.session_state.last_refresh_time = None
+        st.success("Cache/session display cleared. Refresh the board again.")
+
+
 # Clean V3 batter-only tab layout. Removed visible Pitcher K, Pitcher FS, Research Hub, and Moneyline tabs.
-tab_top, tab_batter_fs, tab_hrr, tab_hr, tab_iq, tab_official, tab_calibration, tab_settings = st.tabs([
+tab_top, tab_batter_fs, tab_hrr, tab_hr, tab_learning, tab_official, tab_calibration, tab_settings = st.tabs([
     "🔥 BATTER UPSIDE",
     "1️⃣ BATTER FS",
     "2️⃣ H+R+RBI",
     "3️⃣ HOME RUNS",
-    "🧠 BASEBALL IQ",
+    "🧠 BATTER LEARNING",
     "✅ OFFICIAL PLAYS",
     "CALIBRATION AUDIT",
     "⚙️ SETTINGS",
@@ -26441,8 +26835,8 @@ with tab_hrr:
 with tab_hr:
     render_v3_home_run_tab()
 
-with tab_iq:
-    render_baseball_iq_tab(board)
+with tab_learning:
+    render_v3_batter_learning_lab_tab()
 
 with tab_official:
     render_v3_batter_official_plays_tab()
@@ -26452,183 +26846,3 @@ with tab_calibration:
 
 with tab_settings:
     render_v3_settings_tab()
-
-# =========================
-# ML FINAL REFINEMENT PATCH
-# Adds only Moneyline improvements:
-# 1) stronger but capped ML weighting
-# 2) probable-pitcher validation / cleanup
-# 3) ML confidence calibration labels
-# K Upside + Fantasy projections are untouched.
-# =========================
-
-def _ml_num_from_factors(factors, key, default=0.0):
-    try:
-        return safe_float((factors or {}).get(key), default) or default
-    except Exception:
-        return default
-
-
-def _ml_factor_edge_points(afactors, hfactors):
-    """Translate real ML factor differences into win-probability separation.
-    Designed to avoid 50/50 boards while staying capped to prevent wild ML outputs.
-    """
-    a_bsr = _ml_num_from_factors(afactors, 'BaseRuns/G', MLB_AVG_RUNS_PER_GAME)
-    h_bsr = _ml_num_from_factors(hfactors, 'BaseRuns/G', MLB_AVG_RUNS_PER_GAME)
-    a_wrc = _ml_num_from_factors(afactors, 'Team wRC+ Split', 100)
-    h_wrc = _ml_num_from_factors(hfactors, 'Team wRC+ Split', 100)
-    a_lu = _ml_num_from_factors(afactors, 'Lineup Strength', 50)
-    h_lu = _ml_num_from_factors(hfactors, 'Lineup Strength', 50)
-    a_pyth = _ml_num_from_factors(afactors, 'Pyth Win%', 50)
-    h_pyth = _ml_num_from_factors(hfactors, 'Pyth Win%', 50)
-    a_imp = _ml_num_from_factors(afactors, 'Team Implied Runs', MLB_AVG_RUNS_PER_GAME)
-    h_imp = _ml_num_from_factors(hfactors, 'Team Implied Runs', MLB_AVG_RUNS_PER_GAME)
-    a_rest = _ml_num_from_factors(afactors, 'Rest Edge', 0)
-    h_rest = _ml_num_from_factors(hfactors, 'Rest Edge', 0)
-    a_conf = _ml_num_from_factors(afactors, 'Confirmed Lineup Delta', 0)
-    h_conf = _ml_num_from_factors(hfactors, 'Confirmed Lineup Delta', 0)
-
-    edge = 0.0
-    edge += (a_bsr - h_bsr) * 3.2
-    edge += (a_imp - h_imp) * 2.5
-    edge += (a_wrc - h_wrc) * 0.075
-    edge += (a_lu - h_lu) * 0.16
-    edge += (a_pyth - h_pyth) * 0.075
-    edge += (a_rest - h_rest) * 0.30
-    edge += (a_conf - h_conf) * 0.85
-    return float(clamp(edge, -16.0, 16.0))
-
-
-def _ml_data_quality_label(afactors, hfactors, ap, hp):
-    issues = []
-    ap_name = str((ap or {}).get('pitcher') or '').strip()
-    hp_name = str((hp or {}).get('pitcher') or '').strip()
-    if not ap_name or ap_name == '—':
-        issues.append('AWAY_SP_MISSING')
-    if not hp_name or hp_name == '—':
-        issues.append('HOME_SP_MISSING')
-    if ap_name and hp_name and ap_name == hp_name:
-        issues.append('DUPLICATE_SP_REVIEW')
-    if _ml_num_from_factors(afactors, 'Team ID', None) is None:
-        issues.append('AWAY_TEAM_ID_MISSING')
-    if _ml_num_from_factors(hfactors, 'Team ID', None) is None:
-        issues.append('HOME_TEAM_ID_MISSING')
-    if not issues:
-        return 'OK', ''
-    return 'REVIEW', ', '.join(issues)
-
-
-def _ml_calibrated_confidence(edge, afactors, hfactors, data_label='OK'):
-    edge = abs(safe_float(edge, 0) or 0)
-    # ML confidence should be conservative because moneyline variance is high.
-    conf = 50.0 + min(24.0, edge * 3.2)
-    mode_a = str((afactors or {}).get('Data Mode') or '')
-    mode_h = str((hfactors or {}).get('Data Mode') or '')
-    if 'CONFIRMED' in mode_a or 'CONFIRMED' in mode_h:
-        conf += 2.0
-    if data_label != 'OK':
-        conf -= 5.0
-    return round(float(clamp(conf, 50.0, 78.0)), 1)
-
-
-def _ml_pick_pitchers_clean(ps, away_abbr, home_abbr):
-    """Pick one pitcher row per side and flag probable-pitcher problems.
-    This keeps ML from silently showing the same SP on both teams.
-    """
-    ps = [p for p in (ps or []) if isinstance(p, dict)]
-    away_abbr = str(away_abbr or '').upper()
-    home_abbr = str(home_abbr or '').upper()
-    ap = next((p for p in ps if str(p.get('team') or '').upper() == away_abbr), None)
-    hp = next((p for p in ps if str(p.get('team') or '').upper() == home_abbr), None)
-    if ap is None and ps:
-        ap = ps[0]
-    if hp is None:
-        hp = next((p for p in ps if p is not ap), None) or (ps[1] if len(ps) > 1 else {})
-    ap = ap or {}
-    hp = hp or {}
-    return ap, hp
-
-
-# Preserve current board builder for fallback/reference, then override ML only.
-_prev_ml_build_board_weight_patch = globals().get('ml_build_board', None)
-
-def ml_build_board(board):
-    odds = ml_fetch_oddsapi_h2h()
-    games = {}
-    for p in board or []:
-        if not isinstance(p, dict):
-            continue
-        a, h = ml_sides(p.get('matchup'))
-        team = str(p.get('team') or '').upper()
-        if not a or not h or not team:
-            continue
-        rec = games.setdefault(f'{a} @ {h}', {'away': a, 'home': h, 'pitchers': []})
-        rec['pitchers'].append(p)
-
-    rows = []
-    for matchup, g in games.items():
-        a, h = g['away'], g['home']
-        ps = g.get('pitchers') or []
-        ap, hp = _ml_pick_pitchers_clean(ps, a, h)
-
-        ascore, afactors = ml_moneyline_factors(a, ap, hp)
-        hscore, hfactors = ml_moneyline_factors(h, hp, ap)
-
-        factor_edge = _ml_factor_edge_points(afactors, hfactors)
-        # Blend factor edge with existing score separation. Existing score is still respected,
-        # but the factor edge prevents season-profile boards from staying glued to 50/50.
-        raw_score_edge = clamp((safe_float(ascore, 50) or 50) - (safe_float(hscore, 50) or 50), -12, 12)
-        blended_edge = clamp((factor_edge * 0.72) + (raw_score_edge * 0.28), -16, 16)
-        amodel = round(float(clamp(50.0 + blended_edge, 25, 75)), 1)
-        hmodel = round(100.0 - amodel, 1)
-
-        og = next((x for x in odds if x.get('away_abbr') == a and x.get('home_abbr') == h), None)
-        amkt = og.get('away_market') if og else None
-        hmkt = og.get('home_market') if og else None
-        aedge = None if amkt is None else round(amodel - amkt, 1)
-        hedge = None if hmkt is None else round(hmodel - hmkt, 1)
-        data_label, data_note = _ml_data_quality_label(afactors, hfactors, ap, hp)
-
-        if aedge is None or hedge is None:
-            pick = a if amodel >= hmodel else h
-            edge = round(abs(amodel - hmodel), 1)
-            status = 'MODEL ONLY' if data_label == 'OK' else 'MODEL ONLY — SP REVIEW'
-            grade = f'MODEL LEAN — {pick}'
-        else:
-            pick, edge = (a, aedge) if aedge >= hedge else (h, hedge)
-            if edge >= 6 and data_label == 'OK':
-                status, grade = 'PLAYABLE', f'🔥 ML EDGE — {pick}'
-            elif edge >= 3:
-                status, grade = 'LEAN' if data_label == 'OK' else 'LEAN — SP REVIEW', f'✅ ML LEAN — {pick}'
-            else:
-                status, grade = 'PASS' if data_label == 'OK' else 'PASS — SP REVIEW', f'🚫 PASS ML — {pick}'
-
-        ml_conf = _ml_calibrated_confidence(edge, afactors, hfactors, data_label)
-        rows.append({
-            'Matchup': matchup, 'Pick': pick, 'ML Grade': grade, 'Status': status, 'ML Edge %': edge,
-            'ML Confidence %': ml_conf, 'ML Data Quality': data_label, 'ML Data Note': data_note,
-            'Away Model %': amodel, 'Home Model %': hmodel,
-            'Away Market %': amkt, 'Home Market %': hmkt,
-            'Away Price': og.get('away_price') if og else None, 'Home Price': og.get('home_price') if og else None,
-            'Away SP': ap.get('pitcher', '—') if isinstance(ap, dict) else '—',
-            'Home SP': hp.get('pitcher', '—') if isinstance(hp, dict) else '—',
-            'Away BaseRuns/G': afactors.get('BaseRuns/G'),
-            'Home BaseRuns/G': hfactors.get('BaseRuns/G'),
-            'Away Pyth Win%': afactors.get('Pyth Win%'),
-            'Home Pyth Win%': hfactors.get('Pyth Win%'),
-            'Away Lineup Strength': afactors.get('Lineup Strength'),
-            'Home Lineup Strength': hfactors.get('Lineup Strength'),
-            'Away Bullpen': afactors.get('Bullpen'),
-            'Home Bullpen': hfactors.get('Bullpen'),
-            'Away Rest': afactors.get('Rest'),
-            'Home Rest': hfactors.get('Rest'),
-            'Park': afactors.get('Park'),
-            'Park Factor': afactors.get('Park Factor'),
-            'Away ML Factors': ml_factor_summary(afactors),
-            'Home ML Factors': ml_factor_summary(hfactors),
-            'Source': 'OddsAPI + ML 2.0 + weighted calibration' if og else 'ML 2.0 model only + weighted calibration'
-        })
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        df = df.sort_values('ML Edge %', ascending=False)
-    return df
