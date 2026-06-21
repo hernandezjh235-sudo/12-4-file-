@@ -27411,6 +27411,377 @@ def render_v3_top_batter_plays_board():
             })
 
 
+
+
+# =========================
+# FINAL V3 BATTER FIX — LIVE LINE MATCH SAFETY + PROJECTION FALLBACK
+# Purpose:
+# - Keep Underdog live lines when they match correctly.
+# - Prevent bad fuzzy matches like Felix/Victor Reyes, Willi/Harold Castro, Yainer/Lewin Diaz.
+# - If Underdog lines are missing or not matched, still show projection-only boards/cards.
+# - Restore HR board fallback projections when no active HR lines are posted.
+# - Display layer only: does not change batter projection formulas, save/grade math, or pitcher engine.
+# =========================
+V3_BATTER_LINE_FALLBACK_MATCH_FIX_VERSION = "V3_BATTER_LINE_FALLBACK_MATCH_FIX_2026_06_20"
+
+
+def _v3_strict_batter_name_match_score(ud_player, full_name):
+    """Safer batter name matcher.
+    Must share the same last name. First name must match exactly or be a true initial match.
+    This prevents unrelated same-last-name matches from stealing lines.
+    """
+    ud_norm = _v3_norm_name(ud_player)
+    full_norm = _v3_norm_name(full_name)
+    if not ud_norm or not full_norm:
+        return 0.0
+    up = ud_norm.split()
+    fp = full_norm.split()
+    if not up or not fp:
+        return 0.0
+    # Suffix cleanup.
+    suffixes = {"jr", "sr", "ii", "iii", "iv"}
+    up_core = [x for x in up if x not in suffixes]
+    fp_core = [x for x in fp if x not in suffixes]
+    if not up_core or not fp_core:
+        return 0.0
+    if up_core[-1] != fp_core[-1]:
+        return 0.0
+    # Full exact normalized name.
+    if " ".join(up_core) == " ".join(fp_core):
+        return 1.0
+    # Initial-style Underdog names: S Ohtani, B Witt, etc.
+    if len(up_core[0]) == 1 and fp_core[0].startswith(up_core[0]):
+        return 0.94
+    # Some feeds use first initial with punctuation already stripped.
+    if len(up_core[0]) <= 2 and fp_core[0].startswith(up_core[0][0]):
+        return 0.90
+    # Same first + last, even if middle/suffix differs.
+    if up_core[0] == fp_core[0] and up_core[-1] == fp_core[-1]:
+        return 0.96
+    # Do NOT allow different first names with same last name.
+    return 0.0
+
+
+try:
+    _v3_best_batter_log_match_before_final_safety = _v3_best_batter_log_match
+except Exception:
+    _v3_best_batter_log_match_before_final_safety = None
+
+
+def _v3_best_batter_log_match(ud_player, grouped_items):
+    best_key, best_name, best_score = None, "", 0.0
+    for norm, d in grouped_items:
+        try:
+            pcol = _v3_col(d, ["Player", "Batter", "Name"])
+            full = str(d[pcol].dropna().astype(str).iloc[-1]) if pcol and not d.empty else str(norm)
+        except Exception:
+            full = str(norm)
+        sc = _v3_strict_batter_name_match_score(ud_player, full)
+        if sc > best_score:
+            best_key, best_name, best_score = norm, full, sc
+    return best_key, best_name, best_score
+
+
+def _v3_final_projection_only_batter_table(market="FS", limit=250):
+    """Projection-only fallback for Batter FS / H+R+RBI when UD lines are missing.
+    Uses the same Opening Day log projection helper as the posted-line board.
+    """
+    stat_col = "FS" if str(market).upper() == "FS" else "HRR"
+    market_label = "Batter FS" if stat_col == "FS" else "H+R+RBI"
+    logs = _v3_batter_logs_df()
+    if not isinstance(logs, pd.DataFrame) or logs.empty:
+        return pd.DataFrame(), {"status": "No batter logs loaded", "mode": "PROJECTION_FALLBACK", "matched": 0}
+    pcol = _v3_col(logs, ["Player", "Batter", "Name"])
+    if not pcol or stat_col not in logs.columns:
+        return pd.DataFrame(), {"status": f"Missing Player or {stat_col} column", "mode": "PROJECTION_FALLBACK", "matched": 0}
+    d0 = logs.copy()
+    date_col = _v3_col(d0, ["Date", "Game Date", "game_date"])
+    if date_col:
+        d0["_v3_date"] = pd.to_datetime(d0[date_col], errors="coerce")
+        d0 = d0.sort_values("_v3_date")
+    d0["_v3_player_norm"] = d0[pcol].map(_v3_norm_name)
+    sched = _v3_team_schedule_context_map()
+    out = []
+    for key, d in d0.groupby("_v3_player_norm", sort=False):
+        if not key or d.empty:
+            continue
+        team = _v3_latest_team_for_player(d)
+        # If schedule is available, keep current-slate teams only. If schedule is unavailable, show top projections from logs.
+        if sched and str(team).upper() not in sched:
+            continue
+        full_name = str(d[pcol].dropna().astype(str).iloc[-1])
+        ctx = sched.get(str(team).upper(), {}) if team else {}
+        vals = _v3_last_values(d, stat_col, 1000)
+        proj = _v3_weighted_projection(vals)
+        if proj is None:
+            continue
+        l5 = _v3_last_values(d, stat_col, 5)
+        l10 = _v3_last_values(d, stat_col, 10)
+        l15 = _v3_last_values(d, stat_col, 15)
+        avg, med = _v3_avg_med(l10 if l10 else vals)
+        # Use common tracking baselines only for rates in projection fallback. No fake prop line is created.
+        track_line = 8.5 if stat_col == "FS" else 1.5
+        track_pick = "OVER" if float(proj) >= track_line else "UNDER"
+        l5_rate, l5_pct = _v3_hit_rate(l5, track_line, track_pick)
+        l10_rate, l10_pct = _v3_hit_rate(l10, track_line, track_pick)
+        l15_rate, l15_pct = _v3_hit_rate(l15, track_line, track_pick)
+        same_rate, same_pct = _v3_hit_rate(vals, track_line, track_pick)
+        score = 45
+        if stat_col == "FS":
+            score += clamp(abs(float(proj) - track_line) * 3.5, 0, 22)
+        else:
+            score += clamp(abs(float(proj) - track_line) * 12.0, 0, 22)
+        for pct, wt in [(l5_pct, 9), (l10_pct, 10), (l15_pct, 7), (same_pct, 6)]:
+            if pct is not None:
+                score += abs(pct - 0.50) * wt
+        if len(vals) >= 20:
+            score += 6
+        elif len(vals) >= 10:
+            score += 3
+        if ctx.get("Matchup"):
+            score += 3
+        score = int(round(clamp(score, 0, 100)))
+        label = "PROJECTION TRACK" if score >= 65 else "PROJECTION ONLY"
+        out.append({
+            "Player": full_name,
+            "UD Player": "—",
+            "Match Score": "—",
+            "Team": team or "—",
+            "Opponent": ctx.get("Opponent", "—"),
+            "Matchup": ctx.get("Matchup", "—"),
+            "Home/Away Today": ctx.get("Home/Away", "—"),
+            "Market": market_label,
+            "Pick": "PROJECTION ONLY",
+            "Line": "—",
+            "Projection": round(float(proj), 2),
+            "Edge": "—",
+            "Confidence": "—",
+            "Last 5": l5_rate,
+            "Last 10": l10_rate,
+            "Last 15": l15_rate,
+            "Same-Line": same_rate,
+            "Last 5 Avg": None if not l5 else round(float(np.mean(l5)), 2),
+            "Last 10 Avg": None if not l10 else round(float(np.mean(l10)), 2),
+            "Last 15 Avg": None if not l15 else round(float(np.mean(l15)), 2),
+            "Average": None if avg is None else round(avg, 2),
+            "Median": None if med is None else round(med, 2),
+            "Home/Away": "projection fallback",
+            "H2H": "projection fallback",
+            "Line Sensitivity": _v3_manual_line_sensitivity(proj, stat_col),
+            "Sync Score": score,
+            "Sync Label": label,
+            "Recent Values": l10,
+            "Source": "Projection-only fallback from Opening Day logs; no fake line used",
+            "Evidence": "No active matched Underdog line; projection still shown for tracking",
+            "Official Play Filter": "PROJECTION ONLY — WAIT FOR REAL LINE",
+            "Confirmed Lineup Status": "VERIFY LINEUP / PROJECTED CONTEXT",
+            "Matchup Summary": f"{full_name} {market_label}: projection {round(float(proj),2)}. No active matched Underdog line loaded. Context: {ctx.get('Matchup','schedule not matched')}.",
+            "Research Version": V3_BATTER_LINE_FALLBACK_MATCH_FIX_VERSION,
+        })
+    if not out:
+        return pd.DataFrame(), {"status": "No projection fallback rows built", "mode": "PROJECTION_FALLBACK", "matched": 0}
+    df = pd.DataFrame(out)
+    df = df.sort_values(["Sync Score", "Projection"], ascending=[False, False], na_position="last")
+    return df.head(limit).copy(), {"status": "Projection fallback loaded", "mode": "PROJECTION_FALLBACK", "matched": len(df), "ud_rows": 0}
+
+
+try:
+    _v3_research_table_before_final_fallback = build_v3_batter_research_table
+except Exception:
+    _v3_research_table_before_final_fallback = None
+
+
+def build_v3_batter_research_table(market="FS"):
+    """Final research table: real UD lines first; projection fallback if no clean matched lines."""
+    if _v3_research_table_before_final_fallback is not None:
+        try:
+            df, meta = _v3_research_table_before_final_fallback(market)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                df = df.copy()
+                df["V3 Board Mode"] = "UNDERDOG_LINE_MATCHED"
+                df["Final Match Safety"] = V3_BATTER_LINE_FALLBACK_MATCH_FIX_VERSION
+                return _v3_bq_enhance_df(df) if "_v3_bq_enhance_df" in globals() else df, {**(meta or {}), "mode": "UD_MATCHED", "match_safety": V3_BATTER_LINE_FALLBACK_MATCH_FIX_VERSION}
+        except Exception as e:
+            fallback_df, fallback_meta = _v3_final_projection_only_batter_table(market)
+            return (_v3_bq_enhance_df(fallback_df) if "_v3_bq_enhance_df" in globals() else fallback_df), {**fallback_meta, "status": f"UD builder failed; fallback loaded: {e}"}
+    fallback_df, fallback_meta = _v3_final_projection_only_batter_table(market)
+    return (_v3_bq_enhance_df(fallback_df) if "_v3_bq_enhance_df" in globals() else fallback_df), fallback_meta
+
+
+def _v3_final_projection_only_home_run_table(limit=250):
+    logs = _v3_batter_logs_df()
+    if not isinstance(logs, pd.DataFrame) or logs.empty:
+        return pd.DataFrame(), {"status": "No batter logs loaded", "mode": "HR_PROJECTION_FALLBACK", "matched": 0, "ud_rows": 0}
+    pcol = _v3_col(logs, ["Player", "Batter", "Name"])
+    if not pcol or "HR" not in logs.columns:
+        return pd.DataFrame(), {"status": "Missing Player or HR column", "mode": "HR_PROJECTION_FALLBACK", "matched": 0, "ud_rows": 0}
+    d0 = logs.copy()
+    date_col = _v3_col(d0, ["Date", "Game Date", "game_date"])
+    if date_col:
+        d0["_v3_date"] = pd.to_datetime(d0[date_col], errors="coerce")
+        d0 = d0.sort_values("_v3_date")
+    d0["_v3_player_norm"] = d0[pcol].map(_v3_norm_name)
+    sched = _v3_team_schedule_context_map()
+    out = []
+    for key, d in d0.groupby("_v3_player_norm", sort=False):
+        if not key or d.empty:
+            continue
+        team = _v3_latest_team_for_player(d)
+        if sched and str(team).upper() not in sched:
+            continue
+        full = str(d[pcol].dropna().astype(str).iloc[-1])
+        ctx = sched.get(str(team).upper(), {}) if team else {}
+        pitcher_ctx = _v3_pitcher_matchup_context_for_team(team)
+        hp = _v3_hr_projection_from_logs(d, ctx=ctx, pitcher_ctx=pitcher_ctx)
+        if not hp:
+            continue
+        out.append({
+            "Player": full,
+            "UD Player": "—",
+            "Team": team or "—",
+            "Opponent": ctx.get("Opponent", "—"),
+            "Matchup": ctx.get("Matchup", "—"),
+            "Home/Away Today": ctx.get("Home/Away", "—"),
+            "Market": "Home Runs",
+            "Line": "—",
+            "Pick": "PROJECTION ONLY",
+            "Opp Pitcher": pitcher_ctx.get("Pitcher"),
+            "Pitcher Hand": pitcher_ctx.get("Pitcher Hand"),
+            "Pitcher HR9": pitcher_ctx.get("Pitcher HR9"),
+            "Pitcher K%": pitcher_ctx.get("Pitcher K%"),
+            "HR Probability %": hp["HR Probability %"],
+            "Projected PA": hp["Projected PA"],
+            "HR Grade": hp["HR Grade"],
+            "L7 HR": hp["L7 HR"],
+            "L15 HR": hp["L15 HR"],
+            "L30 HR": hp["L30 HR"],
+            "xHR L15": hp["xHR L15"],
+            "Due Gap": hp["Due Gap"],
+            "Due Label": hp["Due Label"],
+            "Season HR/PA %": hp["Season HR/PA %"],
+            "Recent HR/PA %": hp["Recent HR/PA %"],
+            "Match Score": "—",
+            "Evidence": "No active matched Underdog HR line; projection-only fallback",
+            "Matchup Summary": f"{full} HR projection-only profile vs {pitcher_ctx.get('Pitcher','—')} ({pitcher_ctx.get('Pitcher Hand','—')}). HR9 allowed: {pitcher_ctx.get('Pitcher HR9','—')}. Park: {ctx.get('Venue','—')}. {hp['Due Label']}.",
+            "Final Match Safety": V3_BATTER_LINE_FALLBACK_MATCH_FIX_VERSION,
+        })
+    if not out:
+        return pd.DataFrame(), {"status": "No HR projection fallback rows built", "mode": "HR_PROJECTION_FALLBACK", "matched": 0, "ud_rows": 0}
+    df = pd.DataFrame(out).sort_values(["HR Probability %", "Projected PA"], ascending=[False, False], na_position="last")
+    return df.head(limit).copy(), {"status": "HR projection fallback loaded", "mode": "HR_PROJECTION_FALLBACK", "matched": len(df), "ud_rows": 0}
+
+
+try:
+    _v3_home_run_before_final_fallback = build_v3_home_run_table
+except Exception:
+    _v3_home_run_before_final_fallback = None
+
+
+def build_v3_home_run_table():
+    """Final HR table: real UD HR lines first; projection fallback when HR lines are not posted/matched."""
+    if _v3_home_run_before_final_fallback is not None:
+        try:
+            df, meta = _v3_home_run_before_final_fallback()
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                df = df.copy()
+                df["V3 Board Mode"] = "UNDERDOG_HR_LINE_MATCHED"
+                df["Final Match Safety"] = V3_BATTER_LINE_FALLBACK_MATCH_FIX_VERSION
+                return _v3_bq_enhance_df(df) if "_v3_bq_enhance_df" in globals() else df, {**(meta or {}), "mode": "UD_HR_MATCHED", "match_safety": V3_BATTER_LINE_FALLBACK_MATCH_FIX_VERSION}
+        except Exception as e:
+            fallback_df, fallback_meta = _v3_final_projection_only_home_run_table()
+            return (_v3_bq_enhance_df(fallback_df) if "_v3_bq_enhance_df" in globals() else fallback_df), {**fallback_meta, "status": f"HR UD builder failed; fallback loaded: {e}"}
+    fallback_df, fallback_meta = _v3_final_projection_only_home_run_table()
+    return (_v3_bq_enhance_df(fallback_df) if "_v3_bq_enhance_df" in globals() else fallback_df), fallback_meta
+
+
+# Override top board so it never goes completely blank: active lines remain first, projection-only rows still appear for tracking.
+def build_v3_batter_upside_board_final():
+    rows = {}
+    def getrow(player):
+        key = _v3_norm_name(player)
+        if not key:
+            return None
+        rows.setdefault(key, {"Player": str(player), "Upside Score": 0, "Best Hit Rate %": None, "Has Live Line": False})
+        if len(str(player)) > len(str(rows[key].get("Player") or "")):
+            rows[key]["Player"] = str(player)
+        return rows[key]
+
+    for market, prefix in [("FS", "FS"), ("HRR", "HRR")]:
+        try:
+            df, meta = build_v3_batter_research_table(market)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                for _, r in df.iterrows():
+                    rd = r.to_dict()
+                    d = getrow(rd.get("Player"))
+                    if d is None:
+                        continue
+                    d["Team"] = rd.get("Team", d.get("Team"))
+                    d["Opponent"] = rd.get("Opponent", d.get("Opponent"))
+                    d["Projected PA"] = _v3_final_num(rd.get("Projected PA"), d.get("Projected PA"))
+                    d[f"{prefix} Projection"] = _v3_final_num(rd.get("Projection"), d.get(f"{prefix} Projection"))
+                    d[f"{prefix} Line"] = rd.get("Line")
+                    d[f"{prefix} Pick"] = rd.get("Pick")
+                    d[f"{prefix} Edge"] = rd.get("Edge")
+                    d["Has Live Line"] = bool(d.get("Has Live Line")) or _v3_is_live_ud_line(rd.get("Line"))
+                    d["Best Hit Rate %"] = max(_v3_final_num(d.get("Best Hit Rate %"), 0) or 0, _v3_final_num(rd.get("Best Hit Rate %"), 0) or 0)
+                    d["V3 Board Mode"] = rd.get("V3 Board Mode", d.get("V3 Board Mode", "PROJECTION_FALLBACK"))
+        except Exception:
+            pass
+    try:
+        hr_df, _ = build_v3_home_run_table()
+        if isinstance(hr_df, pd.DataFrame) and not hr_df.empty:
+            for _, r in hr_df.iterrows():
+                rd = r.to_dict()
+                d = getrow(rd.get("Player"))
+                if d is None:
+                    continue
+                d["Team"] = rd.get("Team", d.get("Team"))
+                d["Opponent"] = rd.get("Opponent", d.get("Opponent"))
+                d["Projected PA"] = _v3_final_num(rd.get("Projected PA"), d.get("Projected PA"))
+                d["HR Probability"] = _v3_final_num(rd.get("HR Probability %"), d.get("HR Probability"))
+                d["HR Line"] = rd.get("Line")
+                d["HR Pick"] = rd.get("Pick")
+                d["Has Live Line"] = bool(d.get("Has Live Line")) or _v3_is_live_ud_line(rd.get("Line"))
+    except Exception:
+        pass
+
+    out = []
+    for d in rows.values():
+        fs = _v3_final_num(d.get("FS Projection"), 0) or 0
+        hrr = _v3_final_num(d.get("HRR Projection"), 0) or 0
+        hrp = _v3_final_num(d.get("HR Probability"), 0) or 0
+        pa = _v3_final_num(d.get("Projected PA"), 4.0) or 4.0
+        fs_edge = abs(_v3_final_num(d.get("FS Edge"), 0) or 0)
+        hrr_edge = abs(_v3_final_num(d.get("HRR Edge"), 0) or 0)
+        hit = _v3_final_num(d.get("Best Hit Rate %"), 0) or 0
+        score = 0
+        score += min(25, max(0, (pa - 3.4) * 13))
+        score += min(25, fs * 1.5)
+        score += min(20, hrr * 6.5)
+        score += min(20, hrp * 0.70)
+        score += min(15, fs_edge * 1.7 + hrr_edge * 4.5)
+        score += min(15, max(0, hit - 50) * 0.30)
+        if d.get("Has Live Line"):
+            score += 5
+        d["Projected PA"] = round(pa, 2) if pa else "—"
+        d["FS Projection"] = round(fs, 2) if fs else "—"
+        d["HRR Projection"] = round(hrr, 2) if hrr else "—"
+        d["HR Probability"] = f"{round(hrp, 1)}%" if hrp else "—"
+        d["Best Hit Rate %"] = round(hit, 1) if hit else "—"
+        d["Upside Score"] = int(round(max(0, min(100, score))))
+        d["Line Status"] = "LIVE UD LINE" if d.get("Has Live Line") else "PROJECTION ONLY"
+        out.append(d)
+    if not out:
+        return pd.DataFrame(columns=["Player", "Team", "Opponent", "Projected PA", "FS Projection", "FS Line", "HRR Projection", "HRR Line", "HR Probability", "HR Line", "Best Hit Rate %", "Upside Score", "Line Status"])
+    df = pd.DataFrame(out)
+    df["_live"] = df["Has Live Line"].astype(bool).astype(int) if "Has Live Line" in df.columns else 0
+    df["_norm"] = df["Player"].map(_v3_norm_name)
+    df = df.sort_values(["_live", "Upside Score", "Best Hit Rate %"], ascending=[False, False, False], na_position="last").drop_duplicates("_norm", keep="first")
+    df = df.drop(columns=[c for c in ["_live", "_norm"] if c in df.columns], errors="ignore")
+    cols = ["Line Status", "Player", "Team", "Opponent", "Projected PA", "FS Projection", "FS Line", "FS Pick", "FS Edge", "HRR Projection", "HRR Line", "HRR Pick", "HRR Edge", "HR Probability", "HR Line", "HR Pick", "Best Hit Rate %", "Upside Score", "V3 Board Mode"]
+    df = df[[c for c in cols if c in df.columns]]
+    return _v3_bq_enhance_df(df) if "_v3_bq_enhance_df" in globals() else df
+
 # Clean V3 batter-only tab layout. Removed visible Pitcher K, Pitcher FS, Research Hub, and Moneyline tabs.
 tab_top, tab_batter_fs, tab_hrr, tab_hr, tab_learning, tab_official, tab_calibration, tab_settings = st.tabs([
     "🔥 BATTER UPSIDE",
