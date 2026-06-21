@@ -1198,10 +1198,9 @@ def extract_probable_pitchers_sgo_fallback(date_str):
         away = teams.get("away") or {}
         home_ab = _abbr_from_team(home)
         away_ab = _abbr_from_team(away)
-        # IMPORTANT: this fallback can run before ml_resolve_team_id is defined
-        # during Streamlit script execution. Use it only if it already exists;
-        # otherwise use a compact MLB abbreviation -> team id map so refresh
-        # never crashes or wipes the board.
+        # Safe team-id resolver: this fallback can execute before the full
+        # ml_resolve_team_id() helper is defined lower in the Streamlit script.
+        # Never crash the board refresh because of helper definition order.
         def _safe_team_id(abbr):
             abbr = str(abbr or "").upper().strip()
             try:
@@ -1219,6 +1218,7 @@ def extract_probable_pitchers_sgo_fallback(date_str):
                 "ATH":133,"OAK":133,"PHI":143,"PIT":134,"SD":135,"SDP":135,"SEA":136,
                 "SF":137,"SFG":137,"STL":138,"TB":139,"TBR":139,"TEX":140,"TOR":141,"WSH":120,"WAS":120
             }.get(abbr)
+
         home_id = _safe_team_id(home_ab)
         away_id = _safe_team_id(away_ab)
         matchup = f"{away_ab} @ {home_ab}" if away_ab and home_ab else "MLB"
