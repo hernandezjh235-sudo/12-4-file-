@@ -5620,6 +5620,66 @@ def source_result(source, status, line=None, rows=None, message=""):
     return {"source": source, "status": status, "line": safe_float(line), "rows": rows or [], "message": message}
 
 
+def sportsgameodds_debug_probe(api_key):
+    """Small visible diagnostic so we can tell if SGO is auth, endpoint, parser, or exact-match blocked."""
+    if not api_key:
+        return {"status": "NO_KEY"}
+    url = f"{SPORTSGAMEODDS_BASE}/events/"
+    params = {
+        "leagueID": "MLB",
+        "oddsPresent": "true",
+        "oddsAvailable": "true",
+        "includeOpposingOdds": "true",
+        "includeAltLines": "true",
+        "limit": 5,
+        "apiKey": api_key,
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 MLBKPropEngine/SGO-Debug",
+        "Accept": "application/json",
+        "X-Api-Key": api_key,
+        "x-api-key": api_key,
+    }
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=20)
+        out = {
+            "http_status": r.status_code,
+            "url": url,
+            "params": {k:v for k,v in params.items() if k != "apiKey"},
+            "body_start": r.text[:500],
+        }
+        if r.status_code != 200:
+            out["status"] = "HTTP_ERROR"
+            return out
+        data = r.json()
+        events = data.get("data", data if isinstance(data, list) else [])
+        if isinstance(events, dict):
+            events = list(events.values())
+        odds_total = 0
+        k_like = []
+        player_like = []
+        for ev in events if isinstance(events, list) else []:
+            odds = ev.get("odds", {}) if isinstance(ev, dict) else {}
+            if isinstance(odds, dict):
+                odds_total += len(odds)
+                for odd_id, odd in list(odds.items())[:500]:
+                    blob = (str(odd_id) + " " + str(odd.get("marketName", "")) + " " + str(odd.get("statID", "")) + " " + str(odd.get("statEntityID", ""))).lower() if isinstance(odd, dict) else str(odd_id).lower()
+                    if any(x in blob for x in ["strikeout", "strikeouts", "_ks_", "-ks-", "pitcher"]):
+                        k_like.append(str(odd_id)[:120])
+                    if isinstance(odd, dict) and (odd.get("playerID") or odd.get("statEntityID")):
+                        player_like.append(str(odd.get("playerID") or odd.get("statEntityID"))[:120])
+        out.update({
+            "status": "OK",
+            "events_returned": len(events) if isinstance(events, list) else 0,
+            "odds_total_sample": odds_total,
+            "k_like_oddIDs_sample": k_like[:12],
+            "player_or_stat_entity_sample": player_like[:12],
+        })
+        return out
+    except Exception as e:
+        return {"status": "REQUEST_EXCEPTION", "error": str(e)}
+
+
 def clean_real_prop_debug_rows(rows):
     """Display/storage filter: only valid MLB pitcher strikeout prop rows.
 
@@ -10114,6 +10174,9 @@ with st.sidebar:
     st.caption("Fair odds layer is ON by default. If exact sportsbook line matches UD/Line, card will show no-vig fair odds; otherwise NO EXACT MATCH.")
     if sgo_sidebar_key.strip():
         SPORTSGAMEODDS_API_KEY = sgo_sidebar_key.strip()
+    if st.checkbox("Show SGO debug / connection test", value=False):
+        st.json(sportsgameodds_debug_probe(SPORTSGAMEODDS_API_KEY))
+        st.caption("If HTTP is not 200, the key/plan/auth is failing. If events/odds load but k_like_oddIDs is empty, your SGO plan/feed is not returning MLB pitcher-K props. If k_like exists but cards say NO EXACT MATCH, the parser/exact-line matching is the issue.")
     use_optic = st.checkbox("Optional: OpticOdds API", value=False)
     st.divider()
     st.header("Market Odds Fallback")
