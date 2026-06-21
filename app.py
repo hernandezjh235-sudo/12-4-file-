@@ -1198,8 +1198,29 @@ def extract_probable_pitchers_sgo_fallback(date_str):
         away = teams.get("away") or {}
         home_ab = _abbr_from_team(home)
         away_ab = _abbr_from_team(away)
-        home_id = ml_resolve_team_id(home_ab)
-        away_id = ml_resolve_team_id(away_ab)
+        # IMPORTANT: this fallback can run before ml_resolve_team_id is defined
+        # during Streamlit script execution. Use it only if it already exists;
+        # otherwise use a compact MLB abbreviation -> team id map so refresh
+        # never crashes or wipes the board.
+        def _safe_team_id(abbr):
+            abbr = str(abbr or "").upper().strip()
+            try:
+                fn = globals().get("ml_resolve_team_id")
+                if callable(fn):
+                    val = fn(abbr)
+                    if val:
+                        return val
+            except Exception:
+                pass
+            return {
+                "ARI":109,"ATL":144,"BAL":110,"BOS":111,"CHC":112,"CWS":145,"CHW":145,
+                "CIN":113,"CLE":114,"COL":115,"DET":116,"HOU":117,"KC":118,"KCR":118,
+                "LAA":108,"LAD":119,"MIA":146,"MIL":158,"MIN":142,"NYM":121,"NYY":147,
+                "ATH":133,"OAK":133,"PHI":143,"PIT":134,"SD":135,"SDP":135,"SEA":136,
+                "SF":137,"SFG":137,"STL":138,"TB":139,"TBR":139,"TEX":140,"TOR":141,"WSH":120,"WAS":120
+            }.get(abbr)
+        home_id = _safe_team_id(home_ab)
+        away_id = _safe_team_id(away_ab)
         matchup = f"{away_ab} @ {home_ab}" if away_ab and home_ab else "MLB"
         odds = ev.get("odds") or {}
         if not isinstance(odds, dict):
