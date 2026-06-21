@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# MLB STRIKEOUT PROP ENGINE — ONE FILE — v11.9
+# MLB STRIKEOUT PROP ENGINE
+# PATCH: SportsGameOdds exact-line no-vig fair odds layer added to app 14(1) without changing projection math. — ONE FILE — v11.9
 # MERGED: TRUE CALIBRATION + MANAGER HOOK + DENSITY ALTITUDE
 # Refresh first, then save official before-game snapshot
 # Real lines only. No fake prop lines.
@@ -6744,6 +6745,7 @@ def get_sportsgameodds_k_data(player_name):
     lines = [safe_float(r.get("Line")) for r in rows if safe_float(r.get("Line")) is not None]
     return source_result("SportsGameOdds", "FOUND", line=float(np.median(lines)) if lines else None, rows=rows, message=f"Found {len(rows)} SportsGameOdds priced K rows")
 
+
 @st.cache_data(ttl=600, show_spinner=False)
 def get_opticodds_k_data(player_name):
     if not OPTICODDS_API_KEY:
@@ -7270,6 +7272,63 @@ def _owp_fair_odds_value_signal(model_prob, market_prob):
     if edge <= -0.04:
         return "🚫 MARKET DISAGREE", round(edge, 4)
     return "NEUTRAL FAIR ODDS", round(edge, 4)
+
+
+def _owp_engine_side_from_text(decision, projection=None, line=None):
+    """Return OVER/UNDER from the final engine decision text first, then projection-vs-line.
+
+    This is display-only. It never changes projection math or the saved engine decision.
+    """
+    s = str(decision or "").upper()
+    if "UNDER" in s:
+        return "UNDER"
+    if "OVER" in s:
+        return "OVER"
+    p = safe_float(projection, None)
+    l = safe_float(line, None)
+    if p is not None and l is not None:
+        return "OVER" if p > l else "UNDER" if p < l else "PUSH"
+    return "NO LINE"
+
+
+def _owp_final_card_signal(engine_decision, projection, line, edge, market_agreement=None, fair_signal=None, fair_edge=None):
+    """Boss/advisor final card signal.
+
+    Hierarchy:
+    1) Line-Aware/engine projection and decision are the source of truth.
+    2) Fair odds is advisory only. It can warn, confirm, or boost confidence, but it does not flip the pick.
+    3) Exact-line market disagreement is shown as a warning instead of changing projection/decision.
+    """
+    side = _owp_engine_side_from_text(engine_decision, projection, line)
+    if side not in ("OVER", "UNDER"):
+        return "🚫 NO LINE / PASS", side, "Engine has no playable final side"
+
+    fs = str(fair_signal or "").upper()
+    ma = str(market_agreement or "").upper()
+    fe = safe_float(fair_edge, None)
+    e = safe_float(edge, None)
+
+    # Market/fair-odds is only an advisor. If it disagrees, warn but do not flip.
+    if "DISAGREE" in ma or "MARKET DISAGREE" in fs or (fe is not None and fe <= -0.04):
+        return f"🚫 {side} — MARKET DISAGREE", side, "Projection engine is still boss; fair odds warns against this side"
+
+    if "FAIR ODDS VALUE" in fs or (fe is not None and fe >= 0.08):
+        return f"🔥 {side} — FAIR ODDS VALUE", side, "Engine side plus exact-line market value agree"
+
+    if "SMALL FAIR VALUE" in fs or (fe is not None and fe >= 0.04):
+        return f"⚠️ {side} — SMALL FAIR VALUE", side, "Engine side has small exact-line market value"
+
+    # If no exact odds match, fall back to engine edge only.
+    if "NO EXACT" in fs or ma in ("NO_REAL_ODDS", "NO MARKET", "NO_MARKET", "") or fe is None:
+        if e is not None and abs(e) >= 1.0:
+            return f"🔥 {side} — ENGINE STRONG", side, "No exact market match; using final engine edge only"
+        return f"⚠️ {side} — ENGINE ONLY", side, "No exact market match; projection engine only"
+
+    # Neutral exact-line market: still show the engine side, but do not overstate it.
+    if e is not None and abs(e) >= 1.0:
+        return f"🔥 {side} — ENGINE EDGE", side, "Fair odds neutral; engine edge is strong"
+    return f"⚠️ {side} — THIN/NEUTRAL", side, "Fair odds neutral or thin; use caution"
+
 
 def build_line_history_audit(recent_rows, line, projection=None):
     """Compare active line to L3/L5/L10/season-style recent K averages and hit rate."""
@@ -8516,6 +8575,33 @@ def make_projection(row, bankroll, default_odds, use_statcast, use_pitch_type, u
         "fair_odds_value_edge": fair_odds_value_edge if "fair_odds_value_edge" in locals() else None,
         "fair_odds_value_edge_pct": None if not ("fair_odds_value_edge" in locals()) or fair_odds_value_edge is None else round(float(fair_odds_value_edge) * 100, 1),
         "fair_odds_signal": fair_odds_signal if "fair_odds_signal" in locals() else "NO EXACT MATCH",
+        "final_card_signal": _owp_final_card_signal(
+            final_decision.get("bet_action") if "final_decision" in locals() else pick_side if "pick_side" in locals() else None,
+            mean if "mean" in locals() else None,
+            active_line if "active_line" in locals() else None,
+            gap if "gap" in locals() else None,
+            market_intel.get("market_agreement") if "market_intel" in locals() else "NO_REAL_ODDS",
+            fair_odds_signal if "fair_odds_signal" in locals() else "NO EXACT MATCH",
+            fair_odds_value_edge if "fair_odds_value_edge" in locals() else None,
+        )[0],
+        "final_card_signal_side": _owp_final_card_signal(
+            final_decision.get("bet_action") if "final_decision" in locals() else pick_side if "pick_side" in locals() else None,
+            mean if "mean" in locals() else None,
+            active_line if "active_line" in locals() else None,
+            gap if "gap" in locals() else None,
+            market_intel.get("market_agreement") if "market_intel" in locals() else "NO_REAL_ODDS",
+            fair_odds_signal if "fair_odds_signal" in locals() else "NO EXACT MATCH",
+            fair_odds_value_edge if "fair_odds_value_edge" in locals() else None,
+        )[1],
+        "final_card_signal_note": _owp_final_card_signal(
+            final_decision.get("bet_action") if "final_decision" in locals() else pick_side if "pick_side" in locals() else None,
+            mean if "mean" in locals() else None,
+            active_line if "active_line" in locals() else None,
+            gap if "gap" in locals() else None,
+            market_intel.get("market_agreement") if "market_intel" in locals() else "NO_REAL_ODDS",
+            fair_odds_signal if "fair_odds_signal" in locals() else "NO EXACT MATCH",
+            fair_odds_value_edge if "fair_odds_value_edge" in locals() else None,
+        )[2],
         "market_lean": market_intel.get("market_lean") if "market_intel" in locals() else "NO_MARKET",
         "market_strength": market_intel.get("market_strength") if "market_intel" in locals() else "NONE",
         "market_agreement": market_intel.get("market_agreement") if "market_intel" in locals() else "NO_REAL_ODDS",
@@ -9574,6 +9660,8 @@ def render_pick_card(p):
         <div class="mobile-info-card"><div class="small-muted">Reliability</div><div class="kpi-value">{p.get('reliability_score', '—')}</div><div class="kpi-sub">{p.get('reliability_label', '')}</div></div>
         <div class="mobile-info-card"><div class="small-muted">Integrity</div><div class="kpi-value">{p.get('decision_integrity_score', '—')}</div><div class="kpi-sub">{p.get('decision_integrity_label', '')}</div></div>
         <div class="mobile-info-card"><div class="small-muted">Market</div><div class="kpi-value" style="font-size:16px;">{p.get('market_lean', 'NO_MARKET')}</div><div class="kpi-sub">O {p.get('market_over_odds', '—')} | U {p.get('market_under_odds', '—')}</div></div>
+        <div class="mobile-info-card"><div class="small-muted">No-Vig Fair</div><div class="kpi-value" style="font-size:15px;">{p.get('fair_odds_signal', 'NO EXACT MATCH')}</div><div class="kpi-sub">O {p.get('market_no_vig_over_pct', '—')}% | U {p.get('market_no_vig_under_pct', '—')}% | Edge {p.get('fair_odds_value_edge_pct', '—')}%</div></div>
+        <div class="mobile-info-card"><div class="small-muted">Final Card Signal</div><div class="kpi-value" style="font-size:15px;">{final_card_signal}</div><div class="kpi-sub">Projection engine = boss | Fair odds = advisor</div></div>
         <div class="mobile-info-card"><div class="small-muted">Sharp / Line</div><div class="kpi-value" style="font-size:16px;">{p.get('sharp_warning', 'NONE')}</div><div class="kpi-sub">{p.get('line_history_grade', '—')} | L10 {p.get('line_l10_avg', '—')}</div></div>
         <div class="mobile-info-card"><div class="small-muted">Umpire Zone</div><div class="kpi-value" style="font-size:16px;">{p.get('umpire_strike_zone_score', '—')}</div><div class="kpi-sub">K nudge {p.get('umpire_k_nudge', 0)} | {p.get('umpire', 'Unknown')}</div></div>
       </div>
@@ -11298,6 +11386,23 @@ def render_kproj_pitcher_card(p):
         except Exception:
             pass
 
+    # Final card signal is display-only: Line-Aware Smart/engine is boss; fair odds is advisor.
+    card_market_agreement = p.get("market_agreement", "NO_REAL_ODDS")
+    card_fair_signal = p.get("fair_odds_signal", "NO EXACT MATCH")
+    card_fair_edge = p.get("fair_odds_value_edge", None)
+    if card_row:
+        try:
+            # If the final projection-board row has market fields, prefer those too.
+            card_market_agreement = card_row.get("market_agreement", card_market_agreement)
+            card_fair_signal = card_row.get("fair_odds_signal", card_fair_signal)
+            card_fair_edge = card_row.get("fair_odds_value_edge", card_fair_edge)
+        except Exception:
+            pass
+    final_card_signal, final_card_side, final_card_note = _owp_final_card_signal(
+        d.get("decision"), d.get("projection"), d.get("line"), d.get("edge_display"),
+        card_market_agreement, card_fair_signal, card_fair_edge
+    )
+
     edge_display = d.get("edge_display", "—")
     edge_class = d.get("edge_class", "yellow-badge")
     needs_display = "—" if d.get("over_needed") is None else f"{d.get('over_needed')}+"
@@ -11342,6 +11447,8 @@ def render_kproj_pitcher_card(p):
         <div class="mobile-info-card"><div class="small-muted">Integrity</div><div class="kpi-value">{p.get('decision_integrity_score', '—')}</div><div class="kpi-sub">{p.get('decision_integrity_label', '')}</div></div>
         <div class="mobile-info-card"><div class="small-muted">Market</div><div class="kpi-value" style="font-size:16px;">{p.get('market_lean', 'NO_MARKET')}</div><div class="kpi-sub">O {p.get('market_over_odds', '—')} | U {p.get('market_under_odds', '—')}</div></div>
         <div class="mobile-info-card"><div class="small-muted">No-Vig Fair</div><div class="kpi-value" style="font-size:15px;">{p.get('fair_odds_signal', 'NO EXACT MATCH')}</div><div class="kpi-sub">O {p.get('market_no_vig_over_pct', '—')}% | U {p.get('market_no_vig_under_pct', '—')}% | Edge {p.get('fair_odds_value_edge_pct', '—')}%</div></div>
+        <div class="mobile-info-card"><div class="small-muted">Final Card Signal</div><div class="kpi-value" style="font-size:15px;">{final_card_signal}</div><div class="kpi-sub">Projection engine = boss | Fair odds = advisor</div></div>
+        <div class="mobile-info-card"><div class="small-muted">Sharp</div><div class="kpi-value" style="font-size:18px;">{p.get('sharp_warning', 'NONE')}</div><div class="kpi-sub">{p.get('market_agreement', '')}</div></div>
         <div class="mobile-info-card"><div class="small-muted">Line Audit</div><div class="kpi-value" style="font-size:16px;">{p.get('line_history_grade', '—')}</div><div class="kpi-sub">L10 {p.get('line_l10_avg', '—')} | HR {'' if p.get('line_recent_hit_rate') is None else str(round((p.get('line_recent_hit_rate') or 0)*100))+'%'}</div></div>
         <div class="mobile-info-card"><div class="small-muted">Innings</div><div class="kpi-value" style="font-size:18px;">{p.get('projected_ip', '—')} IP</div><div class="kpi-sub">Pull: {p.get('early_pull_label', '—')} | Pitches {p.get('projected_pitches', '—')}</div></div>
         <div class="mobile-info-card"><div class="small-muted">Pitch Count</div><div class="kpi-value" style="font-size:18px;">{p.get('pitch_count_score', '—')}</div><div class="kpi-sub">{p.get('pitch_count_label', '—')} | L3 {p.get('pitch_count_avg_l3', '—')}</div></div>
@@ -11364,7 +11471,7 @@ def render_kproj_pitcher_card(p):
         <div class="kpi-sub" style="margin-top:4px;">{html.escape(str(p.get('mechanics_k_label','MECH_UNKNOWN')))} | {html.escape(str(p.get('mechanics_k_note',''))[:130])}</div>
         <div class="kpi-sub" style="margin-top:6px;">{attr_html}</div>
       </div>
-      <div class="kpi-sub" style="margin-top:8px;line-height:1.35;">{p.get('market_note','')}<br>{p.get('line_history_note','')}<br>{p.get('sharp_warning_note','')}<br>{p.get('innings_outcome_note','')}</div>
+      <div class="kpi-sub" style="margin-top:8px;line-height:1.35;"><b>Final card note:</b> {html.escape(str(final_card_note))}<br>{p.get('market_note','')}<br>{p.get('line_history_note','')}<br>{p.get('sharp_warning_note','')}<br>{p.get('innings_outcome_note','')}</div>
       <div class="hr-soft"></div>
       <div class="kpi-strip" style="grid-template-columns:repeat(5,minmax(0,1fr));">
         <div class="kpi-box"><div class="kpi-label">{put_label}</div><div class="kpi-value">{put_display}</div><div class="kpi-sub">Putaway/stuff proxy</div></div>
@@ -11503,10 +11610,6 @@ def build_kproj_table(board):
             "Integrity": p.get("decision_integrity_score"),
             "Market Lean": p.get("market_lean"),
             "Market Agree": p.get("market_agreement"),
-            "No-Vig Over %": p.get("market_no_vig_over_pct"),
-            "No-Vig Under %": p.get("market_no_vig_under_pct"),
-            "Fair Odds Edge %": p.get("fair_odds_value_edge_pct"),
-            "Fair Odds Signal": p.get("fair_odds_signal"),
             "Sharp Warning": p.get("sharp_warning"),
             "Line Grade": p.get("line_history_grade"),
             "L10 Avg": p.get("line_l10_avg"),
@@ -11762,8 +11865,7 @@ def render_kproj_tab(board):
         seen_card_pitchers.add(nm)
         card_board.append(p)
     priority = sorted(card_board, key=lambda p: ("🔥" in str(kproj_decision(p).get("decision")), safe_float(kproj_decision(p).get("confidence"), 0) or 0, kproj_upside_projection(p)), reverse=True)
-    st.caption(f"Showing {len(priority)} pitcher cards from the current Projection Board. Cards use the same final Line-Aware row as the board/slates.")
-    for p in priority:
+    for p in priority[:20]:
         render_kproj_pitcher_card(p)
 
 
