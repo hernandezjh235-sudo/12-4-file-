@@ -1124,6 +1124,132 @@ def extract_probable_pitchers(date_str):
             _p["prop_rows"] = clean_real_prop_debug_rows(_p.get("prop_rows", []))
     return rows
 
+
+@st.cache_data(ttl=300, show_spinner=False)
+def extract_probable_pitchers_sgo_fallback(date_str):
+    """Fallback pitcher loader when MLB schedule/probablePitcher returns zero.
+
+    Uses SportsGameOdds pitcher-strikeout markets only to rebuild the pitcher list.
+    It does NOT replace Underdog lines or projection math. It only prevents the
+    board from going to 0 when MLB probable pitchers temporarily disappear.
+    """
+    if not SPORTSGAMEODDS_API_KEY:
+        return []
+
+    headers = {"X-Api-Key": SPORTSGAMEODDS_API_KEY, "Authorization": f"Bearer {SPORTSGAMEODDS_API_KEY}"}
+    params = {
+        "apiKey": SPORTSGAMEODDS_API_KEY,
+        "leagueID": "MLB",
+        "oddsAvailable": "true",
+        "oddsPresent": "true",
+        "includeOpposingOdds": "true",
+        "includeAltLines": "true",
+        "limit": 200,
+    }
+    data = safe_get_json(f"{SPORTSGAMEODDS_BASE}/events/", params=params, headers=headers, timeout=20) or {}
+    events = data.get("data") if isinstance(data, dict) else []
+    if not isinstance(events, list):
+        return []
+
+    def _abbr_from_team(t):
+        if not isinstance(t, dict):
+            return ""
+        names = t.get("names") or {}
+        return str(names.get("short") or names.get("medium") or t.get("abbreviation") or "").upper().strip()
+
+    def _player_from_oddid(oddid):
+        m = re.search(r"pitching[_-]strikeouts-([A-Z0-9_]+?)(?:_\d+_MLB)?-game-ou-(?:over|under)", str(oddid), flags=re.I)
+        if not m:
+            return ""
+        raw = m.group(1)
+        raw = re.sub(r"_\d+_MLB$", "", raw, flags=re.I)
+        raw = raw.replace("_", " ").strip()
+        return " ".join(w.capitalize() for w in raw.split())
+
+    @st.cache_data(ttl=86400, show_spinner=False)
+    def _mlb_person_meta_for_sgo_fallback(name):
+        pid = _mlb_search_player_id_by_name(name)
+        if not pid:
+            return {"id": None, "hand": "R", "team_id": None, "team_abbr": ""}
+        try:
+            d = safe_get_json(f"{MLB_BASE}/people/{pid}", timeout=10) or {}
+            p = (d.get("people") or [{}])[0]
+            hand = (((p.get("pitchHand") or {}).get("code")) or "R")
+            tm = p.get("currentTeam") or {}
+            team_id = tm.get("id")
+            team_name = tm.get("name") or ""
+            # best-effort map full team name to app abbreviation
+            team_abbr = ""
+            tn = normalize_name(team_name)
+            for ab, aliases in MLB_TEAM_ALIASES.items():
+                if tn in [normalize_name(x) for x in aliases]:
+                    team_abbr = ab
+                    break
+            return {"id": pid, "hand": hand, "team_id": team_id, "team_abbr": team_abbr}
+        except Exception:
+            return {"id": pid, "hand": "R", "team_id": None, "team_abbr": ""}
+
+    rows, seen = [], set()
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        teams = ev.get("teams") or {}
+        home = teams.get("home") or {}
+        away = teams.get("away") or {}
+        home_ab = _abbr_from_team(home)
+        away_ab = _abbr_from_team(away)
+        home_id = ml_resolve_team_id(home_ab)
+        away_id = ml_resolve_team_id(away_ab)
+        matchup = f"{away_ab} @ {home_ab}" if away_ab and home_ab else "MLB"
+        odds = ev.get("odds") or {}
+        if not isinstance(odds, dict):
+            continue
+        for oddid in odds.keys():
+            oid = str(oddid)
+            if "pitching_strikeouts" not in oid.lower() or not oid.lower().endswith("-over"):
+                continue
+            name = _player_from_oddid(oid)
+            if not name:
+                continue
+            meta = _mlb_person_meta_for_sgo_fallback(name)
+            pid = meta.get("id")
+            if not pid:
+                continue
+            key = (date_str, pid, matchup)
+            if key in seen:
+                continue
+            seen.add(key)
+            team_id = meta.get("team_id")
+            team_ab = meta.get("team_abbr") or ""
+            if team_id == home_id:
+                team, opp, opp_id, opp_side = home_ab, away_ab, away_id, "away"
+            elif team_id == away_id:
+                team, opp, opp_id, opp_side = away_ab, home_ab, home_id, "home"
+            else:
+                # If team cannot be resolved, keep matchup but still allow model fallback stats.
+                team, opp, opp_id, opp_side = team_ab or "MLB", "MLB", None, "home"
+            rows.append({
+                "date": date_str,
+                "game_pk": None,
+                "game_time": ev.get("startsAt") or ev.get("startTime") or ev.get("scheduledStartTime") or "",
+                "status": "SGO_FALLBACK",
+                "venue": "",
+                "pitcher_id": pid,
+                "pitcher": name,
+                "hand": meta.get("hand") or "R",
+                "team": team,
+                "team_id": team_id,
+                "opponent": opp,
+                "opp_team_id": opp_id,
+                "home_team": home_ab,
+                "away_team": away_ab,
+                "opp_side": opp_side,
+                "matchup": matchup,
+                "pitcher_confirmed": False,
+                "sgo_pitcher_fallback": True,
+            })
+    return rows
+
 def get_pitcher_profile(pid):
     data = safe_get_json(
         f"{MLB_BASE}/people/{pid}/stats",
@@ -10257,6 +10383,21 @@ if refresh_btn:
     all_rows = []
     for d in dates:
         all_rows.extend(extract_probable_pitchers(d))
+
+    # Safety fallback: if MLB probablePitcher feed returns zero, do NOT kill the board.
+    # Try SportsGameOdds pitcher-K markets only as a pitcher-list fallback. Projection math stays untouched.
+    if not all_rows and use_sgo:
+        sgo_fallback_rows = []
+        for d in dates:
+            sgo_fallback_rows.extend(extract_probable_pitchers_sgo_fallback(d))
+        if sgo_fallback_rows:
+            all_rows = sgo_fallback_rows
+            st.warning(f"MLB probable-pitcher feed returned 0. Loaded {len(all_rows)} pitchers from SGO pitcher-K fallback. Verify matchups/lines before saving.")
+
+    if not all_rows:
+        st.warning("Refresh returned 0 pitchers. Keeping the previous/saved board instead of overwriting it. Try again in 5–10 minutes or switch Today/Tomorrow.")
+        st.session_state.last_refresh_time = now_iso()
+        st.stop()
 
     projections = []
     progress = st.progress(0)
