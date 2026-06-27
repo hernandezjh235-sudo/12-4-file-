@@ -27445,425 +27445,9 @@ if "build_kproj_table" in globals():
             return df
 
 
-tab_kproj, tab_pitcher_fs, tab_moneyline, tab_iq, tab_30d_learning, tab_learning_lab, tab_calibration, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "K PROJ / UPSIDE",
-    "PITCHER FS",
-    "MONEYLINE EDGE",
-    "🧠 BASEBALL IQ",
-    "🧠 30D LEARNING IQ",
-    "🧪 LEARNING LAB",
-    "CALIBRATION AUDIT",
-    "ALL PLAYERS",
-    "REAL PROP BOARD",
-    "STATCAST",
-    "AFTER GAMES / LEARNING",
-    "SETTINGS"
-])
-
-with tab_kproj:
-    render_kproj_tab(board)
-
-with tab_pitcher_fs:
-    render_pitcher_fs_tab(board)
-
-with tab_moneyline:
-    render_moneyline_edge_tab(board, dates)
-
-
-with tab_iq:
-    render_baseball_iq_tab(board)
-
-with tab_30d_learning:
-    render_30_day_gamelog_learning_iq()
-
-with tab_learning_lab:
-    render_learning_lab_tab(board)
-
-with tab_calibration:
-    render_calibration_audit_tab()
-
-with tab2:
-    st.markdown('<div class="section-title-pro">All Players</div>', unsafe_allow_html=True)
-    if board:
-        show = pd.DataFrame([{k: v for k, v in p.items() if k not in ["prop_rows", "lineup_rows", "pitch_type_rows"]} for p in board])
-        cols = [
-            "date", "pitcher", "matchup", "hand", "projection", "line", "pick_side", "bet_action", "action_tier",
-            "fair_probability", "edge_ks", "ev", "decision_integrity_score", "decision_integrity_label", "reliability_score", "reliability_label", "official_play_filter", "official_filter_note", "market_lean", "market_strength", "market_agreement", "market_over_odds", "market_under_odds", "sharp_warning", "line_history_grade", "line_l10_avg", "line_recent_hit_rate", "recent_vs_season_flag", "matchup_history_score", "matchup_history_label", "matchup_history_vs_team_starts", "matchup_history_vs_team_avg_ks", "trap_line_score", "trap_line_label", "trap_line_action", "price_source", "price_is_real", "signal", "risk_label",
-            "line_source", "projection_source", "lineup_status", "bullpen_status", "bullpen_bf_factor", "bullpen_recent_pitches", "bullpen_recent_ip", "bullpen_back_to_back_relievers", "underdog_line", "underdog_status", "underdog_message", "data_score", "lineup_locked", "pitcher_confirmed",
-            "statcast_available", "pitch_type_matchup_available", "pitch_type_factor", "pitch_count_score", "pitch_count_label", "pitch_count_avg_l3", "pitch_count_bf_adj", "bayesian_markov_enabled", "xgboost_active", "xgboost_samples", "xgboost_adjustment", "bettable", "leash_risk"
-        ]
-        cols = [c for c in cols if c in show.columns]
-        st.dataframe(show[cols], use_container_width=True, hide_index=True)
-    else:
-        st.info("No players loaded.")
-
-with tab3:
-    st.markdown('<div class="section-title-pro">Real Prop Rows + Underdog Debug</div>', unsafe_allow_html=True)
-    rows = []
-    for p in board:
-        for r in p.get("prop_rows", []):
-            rr = dict(r)
-            rr["Pitcher"] = p.get("pitcher")
-            rr["Projection"] = p.get("projection")
-            rr["Data Score"] = p.get("data_score")
-            rows.append(rr)
-    rows = clean_real_prop_debug_rows(rows)
-    if rows:
-        df_rows = pd.DataFrame(rows)
-        preferred = [c for c in ["Pitcher", "Source", "Parser Mode", "Matched Name", "Line", "Market", "Line Evidence", "Underdog Path", "Match Score", "Reject Reason", "Projection", "Model Lean", "Model Prob %"] if c in df_rows.columns]
-        other = [c for c in df_rows.columns if c not in preferred]
-        st.dataframe(df_rows[preferred + other], use_container_width=True, hide_index=True)
-    else:
-        st.warning("No valid MLB pitcher strikeout prop rows found. Rejected NBA/basketball rows are hidden.")
-
-with tab4:
-    st.markdown('<div class="section-title-pro">Statcast + Pitch-Type</div>', unsafe_allow_html=True)
-    if board:
-        stat_rows = []
-        pitch_rows = []
-        batter_pitch_rows = []
-        lineup_rows = []
-        for p in board:
-            stat_rows.append({
-                "Pitcher": p.get("pitcher"),
-                "Statcast Available": p.get("statcast_available"),
-                "Statcast Rows": p.get("statcast_rows"),
-                "CSW%": p.get("statcast_csw"),
-                "Whiff%": p.get("statcast_whiff"),
-                "Pitch-Type Available": p.get("pitch_type_matchup_available"),
-                "Pitch-Type Factor": p.get("pitch_type_factor"),
-                "Pitch-Type Note": p.get("pitch_type_note"),
-                "Pitch Count Score": p.get("pitch_count_score"),
-                "Pitch Count Label": p.get("pitch_count_label"),
-                "Pitch Count L3": p.get("pitch_count_avg_l3"),
-                "Pitch Count BF Adj": p.get("pitch_count_bf_adj"),
-                "Pitch Count Note": p.get("pitch_count_note"),
-                "Weather Factor": p.get("weather_factor"),
-                "Weather Note": p.get("weather_note"),
-                "Density Altitude Factor": p.get("density_altitude_factor"),
-                "Manager Hook": p.get("manager_hook_status"),
-                "Manager Hook Note": p.get("manager_hook_note"),
-                "Umpire": p.get("umpire"),
-                "Umpire Factor": p.get("ump_factor"),
-                "Umpire Note": p.get("umpire_note"),
-                "Environment Factor": p.get("environment_factor"),
-            })
-            for r in p.get("pitch_type_rows", []):
-                rr = dict(r)
-                rr["Pitcher"] = p.get("pitcher")
-                pitch_rows.append(rr)
-            for r in p.get("batter_pitch_profile_rows", []):
-                rr = dict(r)
-                rr["Pitcher"] = p.get("pitcher")
-                rr["Matchup"] = p.get("matchup")
-                batter_pitch_rows.append(rr)
-            for r in p.get("lineup_rows", []):
-                rr = dict(r)
-                rr["Pitcher"] = p.get("pitcher")
-                rr["Matchup"] = p.get("matchup")
-                lineup_rows.append(rr)
-        st.subheader("Pitcher Statcast Summary")
-        st.dataframe(pd.DataFrame(stat_rows), use_container_width=True, hide_index=True)
-        st.subheader("Pitch-Type Rows")
-        if pitch_rows:
-            st.dataframe(pd.DataFrame(pitch_rows), use_container_width=True, hide_index=True)
-        else:
-            st.info("No pitch-type rows loaded yet.")
-        st.subheader("Per-Batter Pitch-Type Profile")
-        if batter_pitch_rows:
-            st.dataframe(pd.DataFrame(batter_pitch_rows), use_container_width=True, hide_index=True)
-        else:
-            st.info("No per-batter pitch-type rows loaded yet.")
-        st.subheader("Lineup Batter K Inputs")
-        if lineup_rows:
-            st.dataframe(pd.DataFrame(lineup_rows), use_container_width=True, hide_index=True)
-        else:
-            st.info("No posted lineup rows loaded yet.")
-    else:
-        st.info("Load the board first.")
-
-
-
-# =========================
-# FINISHING AUDIT DASHBOARDS — calibration, confidence, miss reasons
-# UI/audit only. Does not change K projections.
-# =========================
-def build_k_projection_bucket_audit(results):
-    rows = []
-    for p in results or []:
-        actual = safe_float(p.get("actual"), None)
-        proj = safe_float(p.get("projection"), safe_float(p.get("K PROJ"), None))
-        result = str(p.get("graded_result") or "")
-        if actual is None or proj is None or result not in ["WIN", "LOSS"]:
-            continue
-        bucket = calibration_bucket(proj, [3.5, 4.5, 5.5, 6.5, 7.5], ["<3.5", "3.5-4.5", "4.5-5.5", "5.5-6.5", "6.5-7.5", "7.5+"])
-        rows.append({"Bucket": bucket, "Projection": proj, "Actual": actual, "Error": actual - proj, "Win": 1 if result == "WIN" else 0})
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    out = df.groupby("Bucket", as_index=False).agg(
-        Plays=("Win", "count"),
-        Win_Rate=("Win", "mean"),
-        Avg_Projection=("Projection", "mean"),
-        Avg_Actual=("Actual", "mean"),
-        Avg_Error=("Error", "mean"),
-    )
-    out["Win Rate %"] = (out["Win_Rate"] * 100).round(1)
-    out["Avg Projection"] = out["Avg_Projection"].round(2)
-    out["Avg Actual"] = out["Avg_Actual"].round(2)
-    out["Avg Error"] = out["Avg_Error"].round(2)
-    return out[["Bucket", "Plays", "Win Rate %", "Avg Projection", "Avg Actual", "Avg Error"]]
-
-
-def build_k_confidence_audit(results):
-    rows = []
-    for p in results or []:
-        result = str(p.get("graded_result") or "")
-        if result not in ["WIN", "LOSS"]:
-            continue
-        conf = safe_float(p.get("confidence"), safe_float(p.get("Confidence %"), None))
-        if conf is None:
-            fp = safe_float(p.get("fair_probability"), None)
-            conf = fp * 100 if fp is not None and fp <= 1 else fp
-        if conf is None:
-            continue
-        bucket = calibration_bucket(conf, [55, 60, 65, 70, 75, 80], ["<55", "55-60", "60-65", "65-70", "70-75", "75-80", "80+"])
-        rows.append({"Confidence Bucket": bucket, "Confidence": conf, "Win": 1 if result == "WIN" else 0})
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    out = df.groupby("Confidence Bucket", as_index=False).agg(Plays=("Win", "count"), Win_Rate=("Win", "mean"), Avg_Confidence=("Confidence", "mean"))
-    out["Win Rate %"] = (out["Win_Rate"] * 100).round(1)
-    out["Avg Confidence %"] = out["Avg_Confidence"].round(1)
-    out["Calibration Gap"] = (out["Win Rate %"] - out["Avg Confidence %"]).round(1)
-    return out[["Confidence Bucket", "Plays", "Avg Confidence %", "Win Rate %", "Calibration Gap"]]
-
-
-def build_better_miss_reason_analytics(results):
-    rows = []
-    for p in results or []:
-        result = str(p.get("graded_result") or "")
-        if result not in ["WIN", "LOSS"]:
-            continue
-        reason = p.get("miss_reason")
-        if not reason:
-            try:
-                reason = classify_k_miss_reason(p).get("miss_reason")
-            except Exception:
-                reason = "UNCLASSIFIED"
-        rows.append({
-            "Miss Reason": reason or "UNCLASSIFIED",
-            "Loss": 1 if result == "LOSS" else 0,
-            "Win": 1 if result == "WIN" else 0,
-            "Early Pull": 1 if (p.get("early_pull_flag") is True or str(reason).upper().find("EARLY_PULL") >= 0) else 0,
-        })
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    out = df.groupby("Miss Reason", as_index=False).agg(Plays=("Loss", "count"), Losses=("Loss", "sum"), Wins=("Win", "sum"), Early_Pulls=("Early Pull", "sum"))
-    out["Loss Rate %"] = ((out["Losses"] / out["Plays"].replace(0, 1)) * 100).round(1)
-    return out.sort_values(["Losses", "Plays"], ascending=False)
-
-with tab5:
-    st.markdown('<div class="section-title-pro">After Games — Grade + Learn</div>', unsafe_allow_html=True)
-    if st.button("✅ AFTER GAMES — Grade Results + Update Learning", use_container_width=True):
-        diag = grade_finished_games_with_diagnostics()
-        graded = diag.get("graded", 0)
-
-        if graded > 0:
-            st.success(f"✅ After-game grading complete: graded {graded} finished official snapshots and updated learning.")
-        else:
-            st.warning("⚠️ After-game grading ran, but graded 0 snapshots.")
-
-        st.write({
-            "Saved snapshots found": diag.get("saved_snapshots"),
-            "Ungraded before grading": diag.get("ungraded_before"),
-            "Already graded before": diag.get("already_graded_before"),
-            "Missing game_pk or pitcher_id": diag.get("missing_game_or_pitcher_id"),
-            "Results before": diag.get("results_before"),
-            "Results after": diag.get("results_after"),
-        })
-        st.caption(f"PICK_LOG: {diag.get('pick_log_path')}")
-        st.caption(f"RESULT_LOG: {diag.get('result_log_path')}")
-
-    st.markdown('<div class="section-title-pro">Manual Actual Results Import — Secure Fallback</div>', unsafe_allow_html=True)
-    st.caption("Use this if automatic MLB grading returns 0 or if you want to verify outcomes manually. Save the official snapshot before games, then after games paste/upload actual results and grade.")
-    st.code("Pitcher,Actual K,Actual IP,Actual BF,Actual ER,Actual Hits,Actual BB,Actual Pitches\nGerrit Cole,6,6.0,24,2,5,2,96\nMichael Wacha,3,6.0,23,1,4,1,91", language="csv")
-    st.caption("You can also paste your slate notes exactly like: • Gerrit Cole — U 5.5 — 4.83 K — IP 4.35❌6-IP6.0")
-    manual_file = st.file_uploader("Upload manual actual results CSV", type=["csv"], key="manual_actual_results_csv")
-    manual_text = st.text_area("Or paste manual actual results CSV here", height=130, key="manual_actual_results_text")
-    allow_manual_overwrite = st.checkbox("Allow overwrite of already graded rows", value=False, key="manual_grade_overwrite")
-    manual_df = pd.DataFrame()
-    try:
-        if manual_file is not None:
-            manual_df = pd.read_csv(manual_file)
-        elif manual_text.strip():
-            from io import StringIO
-            try:
-                manual_df = pd.read_csv(StringIO(manual_text.strip()))
-            except Exception:
-                manual_df = parse_manual_slate_text_to_dataframe(manual_text.strip())
-    except Exception as _manual_parse_e:
-        try:
-            manual_df = parse_manual_slate_text_to_dataframe(manual_text.strip())
-            if manual_df.empty:
-                st.error(f"Manual result parse error: {_manual_parse_e}")
-        except Exception:
-            st.error(f"Manual result parse error: {_manual_parse_e}")
-    if not manual_df.empty:
-        st.write({"Manual rows detected": len(manual_df), "Columns": list(manual_df.columns)})
-        st.dataframe(manual_df.head(25), use_container_width=True, hide_index=True)
-    if st.button("🧾 GRADE FROM MANUAL ACTUAL RESULTS + UPDATE LEARNING", use_container_width=True):
-        diag_manual = grade_finished_games_from_manual_dataframe(manual_df, allow_overwrite=allow_manual_overwrite)
-        if diag_manual.get("graded", 0) > 0:
-            st.success(f"✅ Manual grading complete: graded {diag_manual.get('graded')} rows and updated Learning Lab files.")
-        else:
-            st.warning("⚠️ Manual grading ran, but graded 0 rows. Check unmatched pitchers, columns, or saved snapshots.")
-        st.write(diag_manual)
-
-    if "merge_restored_graded_history_into_result_log" in globals():
-        try:
-            hist_status = merge_restored_graded_history_into_result_log(force=False)
-            if hist_status.get("loaded"):
-                st.success(f"Restored graded history loaded: {hist_status.get('csv_rows', 0)} CSV rows | added {hist_status.get('added_rows', 0)} | skipped duplicates {hist_status.get('duplicates_skipped', 0)}")
-            elif hist_status.get("path") is None:
-                st.info("Restored graded history not found yet: add learning_data/graded_history.csv to start with historical grades.")
-        except Exception as _hist_e:
-            st.warning(f"Restored graded history check failed: {_hist_e}")
-
-    results = load_json(RESULT_LOG, [])
-    if results:
-        df = pd.DataFrame(results)
-        finished = df[df["graded_result"].isin(["WIN", "LOSS"])] if "graded_result" in df.columns else pd.DataFrame()
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Total Graded", len(finished))
-        if not finished.empty:
-            c2.metric("Win Rate", f"{(finished['graded_result'].eq('WIN').mean()*100):.1f}%")
-            c3.metric("Avg EV", f"{(finished['ev'].dropna().mean()*100 if 'ev' in finished.columns and not finished['ev'].dropna().empty else 0):.2f}%")
-            c4.metric("Avg Edge", f"{(finished['abs_edge'].dropna().mean() if 'abs_edge' in finished.columns and not finished['abs_edge'].dropna().empty else 0):.2f}")
-            cal = build_model_calibration_profile(results)
-            c5.metric("Calibration", f"{cal.get('quality_score', 0)}/100")
-        else:
-            c2.metric("Win Rate", "N/A")
-            c3.metric("Avg EV", "N/A")
-            c4.metric("Avg Edge", "N/A")
-            c5.metric("Calibration", "N/A")
-        st.dataframe(df.tail(200), use_container_width=True)
-        st.markdown('<div class="section-title-pro">Signal Tracking</div>', unsafe_allow_html=True)
-        sig = build_signal_tracking()
-        if not sig.empty:
-            st.dataframe(sig, use_container_width=True, hide_index=True)
-        else:
-            st.info("Signal tracking starts after graded wins/losses.")
-        st.markdown('<div class="section-title-pro">Calibration Dashboard</div>', unsafe_allow_html=True)
-        cal_dash = build_k_projection_bucket_audit(results)
-        if not cal_dash.empty:
-            st.dataframe(cal_dash, use_container_width=True, hide_index=True)
-        else:
-            st.info("Calibration dashboard will populate after graded K props.")
-        st.markdown('<div class="section-title-pro">Confidence Calibration Audit</div>', unsafe_allow_html=True)
-        conf_dash = build_k_confidence_audit(results)
-        if not conf_dash.empty:
-            st.dataframe(conf_dash, use_container_width=True, hide_index=True)
-        else:
-            st.info("Confidence audit will populate after graded K props with confidence values.")
-        st.markdown('<div class="section-title-pro">Better Miss-Reason Analytics</div>', unsafe_allow_html=True)
-        miss_analytics = build_better_miss_reason_analytics(results)
-        if not miss_analytics.empty:
-            st.dataframe(miss_analytics, use_container_width=True, hide_index=True)
-        else:
-            st.info("Miss-reason analytics will populate after grading.")
-        st.markdown('<div class="section-title-pro">Volume / Leash Miss Learning</div>', unsafe_allow_html=True)
-        vol_dash = build_volume_miss_learning_dashboard(results)
-        if not vol_dash.empty:
-            st.dataframe(vol_dash, use_container_width=True, hide_index=True)
-        else:
-            st.info("Volume miss learning starts after graded K props with BF/IP/pitch-count data.")
-        vol_data = load_json(VOLUME_MISS_LEARNING_FILE, {})
-        if vol_data:
-            vol_rows = []
-            for label, vals in vol_data.items():
-                rr = {"Volume Miss Label": label}
-                if isinstance(vals, dict):
-                    rr.update(vals)
-                vol_rows.append(rr)
-            st.dataframe(pd.DataFrame(vol_rows).sort_values("count", ascending=False), use_container_width=True, hide_index=True)
-
-        st.markdown('<div class="section-title-pro">Manager Pull Learning</div>', unsafe_allow_html=True)
-        mgr_df = build_manager_pull_learning_dashboard_v11_21(results)
-        st.dataframe(mgr_df, use_container_width=True, hide_index=True)
-
-        st.markdown('<div class="section-title-pro">K Miss Reason Learning</div>', unsafe_allow_html=True)
-        miss_data = load_json(MISS_REASON_FILE, {})
-        if miss_data:
-            miss_rows = []
-            for reason, vals in miss_data.items():
-                rr = {"Miss Reason": reason}
-                if isinstance(vals, dict):
-                    rr.update(vals)
-                miss_rows.append(rr)
-            st.dataframe(pd.DataFrame(miss_rows).sort_values("count", ascending=False), use_container_width=True, hide_index=True)
-        else:
-            st.info("Miss-reason learning starts after grading finished K props.")
-    else:
-        st.info("No graded history yet. Save official snapshots before games, then grade after games finish.")
-
-with tab6:
-    st.markdown('<div class="section-title-pro">Settings / Saved Files</div>', unsafe_allow_html=True)
-    st.code(STORAGE_DIR)
-    st.write("Pick Log:")
-    st.code(PICK_LOG)
-    st.write("Result Log:")
-    st.code(RESULT_LOG)
-    st.write("Learning File:")
-    st.code(LEARN_FILE)
-    st.write("CLV File:")
-    st.code(CLV_FILE)
-    st.write("Long Backtest File:")
-    st.code(LONG_BACKTEST_FILE)
-    st.write("Volume Miss Learning File:")
-    st.code(VOLUME_MISS_LEARNING_FILE)
-    st.write("Manager Pull Learning File:")
-    st.code(MANAGER_PULL_LEARNING_FILE)
-    st.subheader("Advanced Model Status")
-    xgb_train_df = build_xgb_training_frame()
-    st.write(f"XGBoost training samples available: {len(xgb_train_df)} / {XGB_MIN_GRADED_SAMPLES} needed")
-    st.caption("XGBoost is a capped residual assist only. It never overrides Underdog lines or no-bet gates.")
-    st.subheader("Source Status")
-    if board:
-        src_rows = []
-        for p in board:
-            rr = {"Pitcher": p.get("pitcher")}
-            rr.update(p.get("source_status", {}))
-            src_rows.append(rr)
-        st.dataframe(pd.DataFrame(src_rows), use_container_width=True, hide_index=True)
-    req = load_json(REQUEST_LOG_FILE, [])
-    if req:
-        st.subheader("Recent Source Requests / Errors")
-        st.dataframe(pd.DataFrame(req).tail(75), use_container_width=True)
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        if st.button("Clear Current Date-Range Official Snapshots"):
-            picks = load_json(PICK_LOG, [])
-            picks = [p for p in picks if p.get("date") not in dates]
-            save_json(PICK_LOG, picks)
-            st.warning("Cleared current date-range official snapshots.")
-    with col_b:
-        if st.button("Clear Request Logs"):
-            save_json(REQUEST_LOG_FILE, [])
-            st.warning("Request logs cleared.")
-    with col_c:
-        if st.button("Clear ALL Logs"):
-            save_json(PICK_LOG, [])
-            save_json(RESULT_LOG, [])
-            save_json(LEARN_FILE, {})
-            save_json(CLV_FILE, {})
-            save_json(SIGNAL_TRACKING_FILE, [])
-            save_json(LONG_BACKTEST_FILE, [])
-            save_json(LINE_HISTORY_FILE, {})
-            save_json(LINEUP_CACHE_FILE, {})
-            st.error("All logs cleared.")
-
+# =============================================================
+# MONEYLINE PATCH MOVED BEFORE UI RENDER — ACTIVE ON FIRST LOAD
+# =============================================================
 
 # =========================
 # ML FINAL REFINEMENT PATCH
@@ -28370,3 +27954,425 @@ def ml_build_board(board):
     return df
 
 # Keep the existing Moneyline UI, but its data now comes from ML_30_UPGRADE_VERSION.
+
+
+
+tab_kproj, tab_pitcher_fs, tab_moneyline, tab_iq, tab_30d_learning, tab_learning_lab, tab_calibration, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "K PROJ / UPSIDE",
+    "PITCHER FS",
+    "MONEYLINE EDGE",
+    "🧠 BASEBALL IQ",
+    "🧠 30D LEARNING IQ",
+    "🧪 LEARNING LAB",
+    "CALIBRATION AUDIT",
+    "ALL PLAYERS",
+    "REAL PROP BOARD",
+    "STATCAST",
+    "AFTER GAMES / LEARNING",
+    "SETTINGS"
+])
+
+with tab_kproj:
+    render_kproj_tab(board)
+
+with tab_pitcher_fs:
+    render_pitcher_fs_tab(board)
+
+with tab_moneyline:
+    render_moneyline_edge_tab(board, dates)
+
+
+with tab_iq:
+    render_baseball_iq_tab(board)
+
+with tab_30d_learning:
+    render_30_day_gamelog_learning_iq()
+
+with tab_learning_lab:
+    render_learning_lab_tab(board)
+
+with tab_calibration:
+    render_calibration_audit_tab()
+
+with tab2:
+    st.markdown('<div class="section-title-pro">All Players</div>', unsafe_allow_html=True)
+    if board:
+        show = pd.DataFrame([{k: v for k, v in p.items() if k not in ["prop_rows", "lineup_rows", "pitch_type_rows"]} for p in board])
+        cols = [
+            "date", "pitcher", "matchup", "hand", "projection", "line", "pick_side", "bet_action", "action_tier",
+            "fair_probability", "edge_ks", "ev", "decision_integrity_score", "decision_integrity_label", "reliability_score", "reliability_label", "official_play_filter", "official_filter_note", "market_lean", "market_strength", "market_agreement", "market_over_odds", "market_under_odds", "sharp_warning", "line_history_grade", "line_l10_avg", "line_recent_hit_rate", "recent_vs_season_flag", "matchup_history_score", "matchup_history_label", "matchup_history_vs_team_starts", "matchup_history_vs_team_avg_ks", "trap_line_score", "trap_line_label", "trap_line_action", "price_source", "price_is_real", "signal", "risk_label",
+            "line_source", "projection_source", "lineup_status", "bullpen_status", "bullpen_bf_factor", "bullpen_recent_pitches", "bullpen_recent_ip", "bullpen_back_to_back_relievers", "underdog_line", "underdog_status", "underdog_message", "data_score", "lineup_locked", "pitcher_confirmed",
+            "statcast_available", "pitch_type_matchup_available", "pitch_type_factor", "pitch_count_score", "pitch_count_label", "pitch_count_avg_l3", "pitch_count_bf_adj", "bayesian_markov_enabled", "xgboost_active", "xgboost_samples", "xgboost_adjustment", "bettable", "leash_risk"
+        ]
+        cols = [c for c in cols if c in show.columns]
+        st.dataframe(show[cols], use_container_width=True, hide_index=True)
+    else:
+        st.info("No players loaded.")
+
+with tab3:
+    st.markdown('<div class="section-title-pro">Real Prop Rows + Underdog Debug</div>', unsafe_allow_html=True)
+    rows = []
+    for p in board:
+        for r in p.get("prop_rows", []):
+            rr = dict(r)
+            rr["Pitcher"] = p.get("pitcher")
+            rr["Projection"] = p.get("projection")
+            rr["Data Score"] = p.get("data_score")
+            rows.append(rr)
+    rows = clean_real_prop_debug_rows(rows)
+    if rows:
+        df_rows = pd.DataFrame(rows)
+        preferred = [c for c in ["Pitcher", "Source", "Parser Mode", "Matched Name", "Line", "Market", "Line Evidence", "Underdog Path", "Match Score", "Reject Reason", "Projection", "Model Lean", "Model Prob %"] if c in df_rows.columns]
+        other = [c for c in df_rows.columns if c not in preferred]
+        st.dataframe(df_rows[preferred + other], use_container_width=True, hide_index=True)
+    else:
+        st.warning("No valid MLB pitcher strikeout prop rows found. Rejected NBA/basketball rows are hidden.")
+
+with tab4:
+    st.markdown('<div class="section-title-pro">Statcast + Pitch-Type</div>', unsafe_allow_html=True)
+    if board:
+        stat_rows = []
+        pitch_rows = []
+        batter_pitch_rows = []
+        lineup_rows = []
+        for p in board:
+            stat_rows.append({
+                "Pitcher": p.get("pitcher"),
+                "Statcast Available": p.get("statcast_available"),
+                "Statcast Rows": p.get("statcast_rows"),
+                "CSW%": p.get("statcast_csw"),
+                "Whiff%": p.get("statcast_whiff"),
+                "Pitch-Type Available": p.get("pitch_type_matchup_available"),
+                "Pitch-Type Factor": p.get("pitch_type_factor"),
+                "Pitch-Type Note": p.get("pitch_type_note"),
+                "Pitch Count Score": p.get("pitch_count_score"),
+                "Pitch Count Label": p.get("pitch_count_label"),
+                "Pitch Count L3": p.get("pitch_count_avg_l3"),
+                "Pitch Count BF Adj": p.get("pitch_count_bf_adj"),
+                "Pitch Count Note": p.get("pitch_count_note"),
+                "Weather Factor": p.get("weather_factor"),
+                "Weather Note": p.get("weather_note"),
+                "Density Altitude Factor": p.get("density_altitude_factor"),
+                "Manager Hook": p.get("manager_hook_status"),
+                "Manager Hook Note": p.get("manager_hook_note"),
+                "Umpire": p.get("umpire"),
+                "Umpire Factor": p.get("ump_factor"),
+                "Umpire Note": p.get("umpire_note"),
+                "Environment Factor": p.get("environment_factor"),
+            })
+            for r in p.get("pitch_type_rows", []):
+                rr = dict(r)
+                rr["Pitcher"] = p.get("pitcher")
+                pitch_rows.append(rr)
+            for r in p.get("batter_pitch_profile_rows", []):
+                rr = dict(r)
+                rr["Pitcher"] = p.get("pitcher")
+                rr["Matchup"] = p.get("matchup")
+                batter_pitch_rows.append(rr)
+            for r in p.get("lineup_rows", []):
+                rr = dict(r)
+                rr["Pitcher"] = p.get("pitcher")
+                rr["Matchup"] = p.get("matchup")
+                lineup_rows.append(rr)
+        st.subheader("Pitcher Statcast Summary")
+        st.dataframe(pd.DataFrame(stat_rows), use_container_width=True, hide_index=True)
+        st.subheader("Pitch-Type Rows")
+        if pitch_rows:
+            st.dataframe(pd.DataFrame(pitch_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No pitch-type rows loaded yet.")
+        st.subheader("Per-Batter Pitch-Type Profile")
+        if batter_pitch_rows:
+            st.dataframe(pd.DataFrame(batter_pitch_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No per-batter pitch-type rows loaded yet.")
+        st.subheader("Lineup Batter K Inputs")
+        if lineup_rows:
+            st.dataframe(pd.DataFrame(lineup_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No posted lineup rows loaded yet.")
+    else:
+        st.info("Load the board first.")
+
+
+
+# =========================
+# FINISHING AUDIT DASHBOARDS — calibration, confidence, miss reasons
+# UI/audit only. Does not change K projections.
+# =========================
+def build_k_projection_bucket_audit(results):
+    rows = []
+    for p in results or []:
+        actual = safe_float(p.get("actual"), None)
+        proj = safe_float(p.get("projection"), safe_float(p.get("K PROJ"), None))
+        result = str(p.get("graded_result") or "")
+        if actual is None or proj is None or result not in ["WIN", "LOSS"]:
+            continue
+        bucket = calibration_bucket(proj, [3.5, 4.5, 5.5, 6.5, 7.5], ["<3.5", "3.5-4.5", "4.5-5.5", "5.5-6.5", "6.5-7.5", "7.5+"])
+        rows.append({"Bucket": bucket, "Projection": proj, "Actual": actual, "Error": actual - proj, "Win": 1 if result == "WIN" else 0})
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    out = df.groupby("Bucket", as_index=False).agg(
+        Plays=("Win", "count"),
+        Win_Rate=("Win", "mean"),
+        Avg_Projection=("Projection", "mean"),
+        Avg_Actual=("Actual", "mean"),
+        Avg_Error=("Error", "mean"),
+    )
+    out["Win Rate %"] = (out["Win_Rate"] * 100).round(1)
+    out["Avg Projection"] = out["Avg_Projection"].round(2)
+    out["Avg Actual"] = out["Avg_Actual"].round(2)
+    out["Avg Error"] = out["Avg_Error"].round(2)
+    return out[["Bucket", "Plays", "Win Rate %", "Avg Projection", "Avg Actual", "Avg Error"]]
+
+
+def build_k_confidence_audit(results):
+    rows = []
+    for p in results or []:
+        result = str(p.get("graded_result") or "")
+        if result not in ["WIN", "LOSS"]:
+            continue
+        conf = safe_float(p.get("confidence"), safe_float(p.get("Confidence %"), None))
+        if conf is None:
+            fp = safe_float(p.get("fair_probability"), None)
+            conf = fp * 100 if fp is not None and fp <= 1 else fp
+        if conf is None:
+            continue
+        bucket = calibration_bucket(conf, [55, 60, 65, 70, 75, 80], ["<55", "55-60", "60-65", "65-70", "70-75", "75-80", "80+"])
+        rows.append({"Confidence Bucket": bucket, "Confidence": conf, "Win": 1 if result == "WIN" else 0})
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    out = df.groupby("Confidence Bucket", as_index=False).agg(Plays=("Win", "count"), Win_Rate=("Win", "mean"), Avg_Confidence=("Confidence", "mean"))
+    out["Win Rate %"] = (out["Win_Rate"] * 100).round(1)
+    out["Avg Confidence %"] = out["Avg_Confidence"].round(1)
+    out["Calibration Gap"] = (out["Win Rate %"] - out["Avg Confidence %"]).round(1)
+    return out[["Confidence Bucket", "Plays", "Avg Confidence %", "Win Rate %", "Calibration Gap"]]
+
+
+def build_better_miss_reason_analytics(results):
+    rows = []
+    for p in results or []:
+        result = str(p.get("graded_result") or "")
+        if result not in ["WIN", "LOSS"]:
+            continue
+        reason = p.get("miss_reason")
+        if not reason:
+            try:
+                reason = classify_k_miss_reason(p).get("miss_reason")
+            except Exception:
+                reason = "UNCLASSIFIED"
+        rows.append({
+            "Miss Reason": reason or "UNCLASSIFIED",
+            "Loss": 1 if result == "LOSS" else 0,
+            "Win": 1 if result == "WIN" else 0,
+            "Early Pull": 1 if (p.get("early_pull_flag") is True or str(reason).upper().find("EARLY_PULL") >= 0) else 0,
+        })
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    out = df.groupby("Miss Reason", as_index=False).agg(Plays=("Loss", "count"), Losses=("Loss", "sum"), Wins=("Win", "sum"), Early_Pulls=("Early Pull", "sum"))
+    out["Loss Rate %"] = ((out["Losses"] / out["Plays"].replace(0, 1)) * 100).round(1)
+    return out.sort_values(["Losses", "Plays"], ascending=False)
+
+with tab5:
+    st.markdown('<div class="section-title-pro">After Games — Grade + Learn</div>', unsafe_allow_html=True)
+    if st.button("✅ AFTER GAMES — Grade Results + Update Learning", use_container_width=True):
+        diag = grade_finished_games_with_diagnostics()
+        graded = diag.get("graded", 0)
+
+        if graded > 0:
+            st.success(f"✅ After-game grading complete: graded {graded} finished official snapshots and updated learning.")
+        else:
+            st.warning("⚠️ After-game grading ran, but graded 0 snapshots.")
+
+        st.write({
+            "Saved snapshots found": diag.get("saved_snapshots"),
+            "Ungraded before grading": diag.get("ungraded_before"),
+            "Already graded before": diag.get("already_graded_before"),
+            "Missing game_pk or pitcher_id": diag.get("missing_game_or_pitcher_id"),
+            "Results before": diag.get("results_before"),
+            "Results after": diag.get("results_after"),
+        })
+        st.caption(f"PICK_LOG: {diag.get('pick_log_path')}")
+        st.caption(f"RESULT_LOG: {diag.get('result_log_path')}")
+
+    st.markdown('<div class="section-title-pro">Manual Actual Results Import — Secure Fallback</div>', unsafe_allow_html=True)
+    st.caption("Use this if automatic MLB grading returns 0 or if you want to verify outcomes manually. Save the official snapshot before games, then after games paste/upload actual results and grade.")
+    st.code("Pitcher,Actual K,Actual IP,Actual BF,Actual ER,Actual Hits,Actual BB,Actual Pitches\nGerrit Cole,6,6.0,24,2,5,2,96\nMichael Wacha,3,6.0,23,1,4,1,91", language="csv")
+    st.caption("You can also paste your slate notes exactly like: • Gerrit Cole — U 5.5 — 4.83 K — IP 4.35❌6-IP6.0")
+    manual_file = st.file_uploader("Upload manual actual results CSV", type=["csv"], key="manual_actual_results_csv")
+    manual_text = st.text_area("Or paste manual actual results CSV here", height=130, key="manual_actual_results_text")
+    allow_manual_overwrite = st.checkbox("Allow overwrite of already graded rows", value=False, key="manual_grade_overwrite")
+    manual_df = pd.DataFrame()
+    try:
+        if manual_file is not None:
+            manual_df = pd.read_csv(manual_file)
+        elif manual_text.strip():
+            from io import StringIO
+            try:
+                manual_df = pd.read_csv(StringIO(manual_text.strip()))
+            except Exception:
+                manual_df = parse_manual_slate_text_to_dataframe(manual_text.strip())
+    except Exception as _manual_parse_e:
+        try:
+            manual_df = parse_manual_slate_text_to_dataframe(manual_text.strip())
+            if manual_df.empty:
+                st.error(f"Manual result parse error: {_manual_parse_e}")
+        except Exception:
+            st.error(f"Manual result parse error: {_manual_parse_e}")
+    if not manual_df.empty:
+        st.write({"Manual rows detected": len(manual_df), "Columns": list(manual_df.columns)})
+        st.dataframe(manual_df.head(25), use_container_width=True, hide_index=True)
+    if st.button("🧾 GRADE FROM MANUAL ACTUAL RESULTS + UPDATE LEARNING", use_container_width=True):
+        diag_manual = grade_finished_games_from_manual_dataframe(manual_df, allow_overwrite=allow_manual_overwrite)
+        if diag_manual.get("graded", 0) > 0:
+            st.success(f"✅ Manual grading complete: graded {diag_manual.get('graded')} rows and updated Learning Lab files.")
+        else:
+            st.warning("⚠️ Manual grading ran, but graded 0 rows. Check unmatched pitchers, columns, or saved snapshots.")
+        st.write(diag_manual)
+
+    if "merge_restored_graded_history_into_result_log" in globals():
+        try:
+            hist_status = merge_restored_graded_history_into_result_log(force=False)
+            if hist_status.get("loaded"):
+                st.success(f"Restored graded history loaded: {hist_status.get('csv_rows', 0)} CSV rows | added {hist_status.get('added_rows', 0)} | skipped duplicates {hist_status.get('duplicates_skipped', 0)}")
+            elif hist_status.get("path") is None:
+                st.info("Restored graded history not found yet: add learning_data/graded_history.csv to start with historical grades.")
+        except Exception as _hist_e:
+            st.warning(f"Restored graded history check failed: {_hist_e}")
+
+    results = load_json(RESULT_LOG, [])
+    if results:
+        df = pd.DataFrame(results)
+        finished = df[df["graded_result"].isin(["WIN", "LOSS"])] if "graded_result" in df.columns else pd.DataFrame()
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Total Graded", len(finished))
+        if not finished.empty:
+            c2.metric("Win Rate", f"{(finished['graded_result'].eq('WIN').mean()*100):.1f}%")
+            c3.metric("Avg EV", f"{(finished['ev'].dropna().mean()*100 if 'ev' in finished.columns and not finished['ev'].dropna().empty else 0):.2f}%")
+            c4.metric("Avg Edge", f"{(finished['abs_edge'].dropna().mean() if 'abs_edge' in finished.columns and not finished['abs_edge'].dropna().empty else 0):.2f}")
+            cal = build_model_calibration_profile(results)
+            c5.metric("Calibration", f"{cal.get('quality_score', 0)}/100")
+        else:
+            c2.metric("Win Rate", "N/A")
+            c3.metric("Avg EV", "N/A")
+            c4.metric("Avg Edge", "N/A")
+            c5.metric("Calibration", "N/A")
+        st.dataframe(df.tail(200), use_container_width=True)
+        st.markdown('<div class="section-title-pro">Signal Tracking</div>', unsafe_allow_html=True)
+        sig = build_signal_tracking()
+        if not sig.empty:
+            st.dataframe(sig, use_container_width=True, hide_index=True)
+        else:
+            st.info("Signal tracking starts after graded wins/losses.")
+        st.markdown('<div class="section-title-pro">Calibration Dashboard</div>', unsafe_allow_html=True)
+        cal_dash = build_k_projection_bucket_audit(results)
+        if not cal_dash.empty:
+            st.dataframe(cal_dash, use_container_width=True, hide_index=True)
+        else:
+            st.info("Calibration dashboard will populate after graded K props.")
+        st.markdown('<div class="section-title-pro">Confidence Calibration Audit</div>', unsafe_allow_html=True)
+        conf_dash = build_k_confidence_audit(results)
+        if not conf_dash.empty:
+            st.dataframe(conf_dash, use_container_width=True, hide_index=True)
+        else:
+            st.info("Confidence audit will populate after graded K props with confidence values.")
+        st.markdown('<div class="section-title-pro">Better Miss-Reason Analytics</div>', unsafe_allow_html=True)
+        miss_analytics = build_better_miss_reason_analytics(results)
+        if not miss_analytics.empty:
+            st.dataframe(miss_analytics, use_container_width=True, hide_index=True)
+        else:
+            st.info("Miss-reason analytics will populate after grading.")
+        st.markdown('<div class="section-title-pro">Volume / Leash Miss Learning</div>', unsafe_allow_html=True)
+        vol_dash = build_volume_miss_learning_dashboard(results)
+        if not vol_dash.empty:
+            st.dataframe(vol_dash, use_container_width=True, hide_index=True)
+        else:
+            st.info("Volume miss learning starts after graded K props with BF/IP/pitch-count data.")
+        vol_data = load_json(VOLUME_MISS_LEARNING_FILE, {})
+        if vol_data:
+            vol_rows = []
+            for label, vals in vol_data.items():
+                rr = {"Volume Miss Label": label}
+                if isinstance(vals, dict):
+                    rr.update(vals)
+                vol_rows.append(rr)
+            st.dataframe(pd.DataFrame(vol_rows).sort_values("count", ascending=False), use_container_width=True, hide_index=True)
+
+        st.markdown('<div class="section-title-pro">Manager Pull Learning</div>', unsafe_allow_html=True)
+        mgr_df = build_manager_pull_learning_dashboard_v11_21(results)
+        st.dataframe(mgr_df, use_container_width=True, hide_index=True)
+
+        st.markdown('<div class="section-title-pro">K Miss Reason Learning</div>', unsafe_allow_html=True)
+        miss_data = load_json(MISS_REASON_FILE, {})
+        if miss_data:
+            miss_rows = []
+            for reason, vals in miss_data.items():
+                rr = {"Miss Reason": reason}
+                if isinstance(vals, dict):
+                    rr.update(vals)
+                miss_rows.append(rr)
+            st.dataframe(pd.DataFrame(miss_rows).sort_values("count", ascending=False), use_container_width=True, hide_index=True)
+        else:
+            st.info("Miss-reason learning starts after grading finished K props.")
+    else:
+        st.info("No graded history yet. Save official snapshots before games, then grade after games finish.")
+
+with tab6:
+    st.markdown('<div class="section-title-pro">Settings / Saved Files</div>', unsafe_allow_html=True)
+    st.code(STORAGE_DIR)
+    st.write("Pick Log:")
+    st.code(PICK_LOG)
+    st.write("Result Log:")
+    st.code(RESULT_LOG)
+    st.write("Learning File:")
+    st.code(LEARN_FILE)
+    st.write("CLV File:")
+    st.code(CLV_FILE)
+    st.write("Long Backtest File:")
+    st.code(LONG_BACKTEST_FILE)
+    st.write("Volume Miss Learning File:")
+    st.code(VOLUME_MISS_LEARNING_FILE)
+    st.write("Manager Pull Learning File:")
+    st.code(MANAGER_PULL_LEARNING_FILE)
+    st.subheader("Advanced Model Status")
+    xgb_train_df = build_xgb_training_frame()
+    st.write(f"XGBoost training samples available: {len(xgb_train_df)} / {XGB_MIN_GRADED_SAMPLES} needed")
+    st.caption("XGBoost is a capped residual assist only. It never overrides Underdog lines or no-bet gates.")
+    st.subheader("Source Status")
+    if board:
+        src_rows = []
+        for p in board:
+            rr = {"Pitcher": p.get("pitcher")}
+            rr.update(p.get("source_status", {}))
+            src_rows.append(rr)
+        st.dataframe(pd.DataFrame(src_rows), use_container_width=True, hide_index=True)
+    req = load_json(REQUEST_LOG_FILE, [])
+    if req:
+        st.subheader("Recent Source Requests / Errors")
+        st.dataframe(pd.DataFrame(req).tail(75), use_container_width=True)
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        if st.button("Clear Current Date-Range Official Snapshots"):
+            picks = load_json(PICK_LOG, [])
+            picks = [p for p in picks if p.get("date") not in dates]
+            save_json(PICK_LOG, picks)
+            st.warning("Cleared current date-range official snapshots.")
+    with col_b:
+        if st.button("Clear Request Logs"):
+            save_json(REQUEST_LOG_FILE, [])
+            st.warning("Request logs cleared.")
+    with col_c:
+        if st.button("Clear ALL Logs"):
+            save_json(PICK_LOG, [])
+            save_json(RESULT_LOG, [])
+            save_json(LEARN_FILE, {})
+            save_json(CLV_FILE, {})
+            save_json(SIGNAL_TRACKING_FILE, [])
+            save_json(LONG_BACKTEST_FILE, [])
+            save_json(LINE_HISTORY_FILE, {})
+            save_json(LINEUP_CACHE_FILE, {})
+            st.error("All logs cleared.")
+
