@@ -28045,3 +28045,328 @@ def ml_build_board(board):
         df = df.sort_values('ML Edge %', ascending=False)
     return df
 
+
+
+# =============================================================
+# MONEYLINE 3.0 UPGRADE — STRICT EDGE + RUN MODEL
+# Added after all prior ML layers so it overrides ONLY the Moneyline tab.
+# Does NOT touch K projections, K environment, Save Official, grading, or learning.
+# Goals:
+# - Reduce 8-8 style coin-flip days by passing thin ML edges.
+# - Use starting pitcher, offense split, bullpen/run prevention, rest, park, and market edge.
+# - Keep all adjustments capped/conservative.
+# =============================================================
+ML_30_UPGRADE_VERSION = "ML_30_STRICT_EDGE_RUN_MODEL_2026_06_27"
+
+
+def _ml30_num(x, default=None):
+    try:
+        if x in (None, "", "—"):
+            return default
+        v = float(x)
+        if pd.isna(v):
+            return default
+        return v
+    except Exception:
+        return default
+
+
+def _ml30_pct(x, default=None):
+    v = _ml30_num(x, default)
+    if v is None:
+        return default
+    if abs(v) <= 1:
+        v *= 100.0
+    return v
+
+
+def _ml30_pick_first(row, keys, default=None):
+    row = row if isinstance(row, dict) else {}
+    for k in keys:
+        v = row.get(k)
+        if v not in (None, "", "—"):
+            return v
+    return default
+
+
+def _ml30_split_matchup(matchup):
+    try:
+        a, h = ml_sides(matchup)
+        return str(a or '').upper().strip(), str(h or '').upper().strip()
+    except Exception:
+        try:
+            s = str(matchup or '')
+            if '@' in s:
+                a, h = [x.strip().upper() for x in s.split('@', 1)]
+                return a, h
+        except Exception:
+            pass
+    return '', ''
+
+
+def _ml30_team_from_row(row):
+    return str((row or {}).get('team') or (row or {}).get('Team') or (row or {}).get('Pitcher Team') or '').upper().strip()
+
+
+def _ml30_k_projection(row):
+    row = row if isinstance(row, dict) else {}
+    for k in [
+        'Line-Aware Smart Final K Projection', 'Official K PROJ', 'K PROJ', 'Final K Projection',
+        'projection', 'Median', 'K Projection'
+    ]:
+        v = _ml30_num(row.get(k), None)
+        if v is not None:
+            return v
+    try:
+        return _ml30_num(kproj_upside_projection(row), 4.5)
+    except Exception:
+        return 4.5
+
+
+def _ml30_sp_strength(row):
+    """Positive = pitcher helps his own team win. Capped so SP never dominates alone."""
+    row = row if isinstance(row, dict) else {}
+    k_proj = _ml30_k_projection(row)
+    ip = _ml30_num(_ml30_pick_first(row, ['IP Projection', 'IP Floor', 'ip_floor', 'IP', 'recent_ip']), 5.2)
+    pk = _ml30_pct(_ml30_pick_first(row, ['Pitcher K%', 'pitcher_k', 'Pitcher K Rate']), 22.5)
+    bb = _ml30_pct(_ml30_pick_first(row, ['BB%', 'Pitcher BB%', 'bb_pct']), 8.0)
+    kbb = _ml30_pct(_ml30_pick_first(row, ['K-BB%', 'KBB%', 'kbb_pct']), None)
+    fip = _ml30_num(_ml30_pick_first(row, ['FIP', 'xFIP', 'SIERA']), None)
+    er = _ml30_num(_ml30_pick_first(row, ['ER Projection', 'ER Proj', 'Recent ER', 'ER']), None)
+    whip = _ml30_num(_ml30_pick_first(row, ['WHIP', 'Pitcher WHIP']), None)
+
+    strength = 50.0
+    strength += clamp((k_proj - 4.8) * 3.4, -9.0, 12.0)
+    strength += clamp((ip - 5.2) * 4.0, -6.0, 7.0)
+    strength += clamp((pk - 22.5) * 0.45, -7.0, 8.0)
+    strength -= clamp((bb - 8.0) * 0.45, -4.0, 7.0)
+    if kbb is not None:
+        strength += clamp((kbb - 14.0) * 0.32, -5.0, 6.0)
+    if fip is not None:
+        strength -= clamp((fip - 4.25) * 2.2, -5.0, 6.0)
+    if er is not None:
+        strength -= clamp((er - 2.6) * 1.4, -4.0, 5.0)
+    if whip is not None:
+        strength -= clamp((whip - 1.25) * 9.0, -4.0, 5.0)
+
+    return round(float(clamp(strength, 32.0, 72.0)), 2)
+
+
+def _ml30_expected_runs(team_abbr, team_pitcher_row, opp_pitcher_row):
+    """Team expected runs. Opposing SP lowers/raises runs; offense/env factors drive base."""
+    try:
+        base_score, factors = ml_moneyline_factors(team_abbr, team_pitcher_row, opp_pitcher_row)
+    except Exception:
+        base_score, factors = 50.0, {}
+    factors = dict(factors or {})
+
+    implied = _ml30_num(factors.get('Team Implied Runs'), None)
+    baseruns = _ml30_num(factors.get('BaseRuns/G'), None)
+    runs_pg = _ml30_num(factors.get('Runs/G'), None)
+    base = implied if implied is not None else baseruns if baseruns is not None else runs_pg if runs_pg is not None else MLB_AVG_RUNS_PER_GAME
+    base = clamp(base, 2.7, 6.9)
+
+    wrc = _ml30_num(factors.get('Team wRC+ Split'), 100.0)
+    lineup = _ml30_num(factors.get('Lineup Strength'), 50.0)
+    pyth = _ml30_num(factors.get('Pyth Win%'), 50.0)
+    park = _ml30_num(factors.get('Park Factor'), 1.0)
+    rest = _ml30_num(factors.get('Rest Edge'), 0.0)
+    conf = _ml30_num(factors.get('Confirmed Lineup Delta'), 0.0)
+
+    opp_sp = _ml30_sp_strength(opp_pitcher_row)
+    # If opposing SP > 50, lower runs; if weak SP < 50, raise runs.
+    opp_sp_run_adj = clamp((50.0 - opp_sp) * 0.035, -0.55, 0.55)
+
+    runs = base
+    runs += clamp((wrc - 100.0) * 0.010, -0.40, 0.45)
+    runs += clamp((lineup - 50.0) * 0.010, -0.35, 0.40)
+    if baseruns is not None:
+        runs += clamp((baseruns - MLB_AVG_RUNS_PER_GAME) * 0.22, -0.30, 0.35)
+    runs += clamp((pyth - 50.0) * 0.010, -0.25, 0.25)
+    runs += clamp((park - 1.0) * 0.70, -0.35, 0.45)
+    runs += clamp(rest * 0.050, -0.12, 0.12)
+    runs += clamp(conf * 0.080, -0.20, 0.20)
+    runs += opp_sp_run_adj
+    runs = clamp(runs, 2.2, 7.4)
+
+    factors.update({
+        'ML30 Projected Runs': round(float(runs), 2),
+        'ML30 Opp SP Strength': opp_sp,
+        'ML30 Opp SP Run Adj': round(float(opp_sp_run_adj), 3),
+        'ML30 Base Runs Used': round(float(base), 2),
+        'ML Version': ML_30_UPGRADE_VERSION,
+    })
+    return float(runs), float(base_score or 50.0), factors
+
+
+def _ml30_win_prob_from_runs(team_runs, opp_runs):
+    # Conservative MLB run-diff logistic. +1 run ≈ 62%; avoids extreme model-only picks.
+    try:
+        diff = float(team_runs) - float(opp_runs)
+        p = 1.0 / (1.0 + math.exp(-0.70 * diff))
+        return float(clamp(p * 100.0, 28.0, 72.0))
+    except Exception:
+        return 50.0
+
+
+def _ml30_data_quality(af, hf, ap, hp):
+    issues = []
+    if not str((ap or {}).get('pitcher') or (ap or {}).get('Pitcher') or '').strip():
+        issues.append('AWAY_SP_MISSING')
+    if not str((hp or {}).get('pitcher') or (hp or {}).get('Pitcher') or '').strip():
+        issues.append('HOME_SP_MISSING')
+    if _ml30_num((af or {}).get('Team ID'), None) is None:
+        issues.append('AWAY_TEAM_PROFILE_WEAK')
+    if _ml30_num((hf or {}).get('Team ID'), None) is None:
+        issues.append('HOME_TEAM_PROFILE_WEAK')
+    return ('OK', '') if not issues else ('REVIEW', ', '.join(issues))
+
+
+def _ml30_confidence(edge, score_edge, data_quality, market_available):
+    e = abs(_ml30_num(edge, 0.0) or 0.0)
+    se = abs(_ml30_num(score_edge, 0.0) or 0.0)
+    conf = 50.0 + min(18.0, e * 2.5) + min(6.0, se * 5.0)
+    if market_available:
+        conf += 2.0
+    if data_quality != 'OK':
+        conf -= 6.0
+    return round(float(clamp(conf, 50.0, 78.0)), 1)
+
+
+_prev_ml_build_board_ml30 = globals().get('ml_build_board', None)
+
+def ml_build_board(board):
+    """Moneyline 3.0 strict board. K props/projections are untouched."""
+    try:
+        odds = ml_fetch_oddsapi_h2h()
+    except Exception:
+        odds = []
+
+    games = {}
+    for p in board or []:
+        if not isinstance(p, dict):
+            continue
+        a, h = _ml30_split_matchup(p.get('matchup') or p.get('Matchup'))
+        team = _ml30_team_from_row(p)
+        if not a or not h or not team:
+            continue
+        rec = games.setdefault(f'{a} @ {h}', {'away': a, 'home': h, 'pitchers': []})
+        rec['pitchers'].append(p)
+
+    rows = []
+    for matchup, g in games.items():
+        a, h = g['away'], g['home']
+        ps = g['pitchers']
+        try:
+            ap, hp = _ml_pick_pitchers_clean(ps, a, h)
+        except Exception:
+            ap = next((p for p in ps if _ml30_team_from_row(p) == a), None) or (ps[0] if ps else {})
+            hp = next((p for p in ps if _ml30_team_from_row(p) == h), None) or (ps[1] if len(ps) > 1 else {})
+
+        aruns, ascore, af = _ml30_expected_runs(a, ap, hp)
+        hruns, hscore, hf = _ml30_expected_runs(h, hp, ap)
+
+        # Score model is lead signal.
+        amodel_score = _ml30_win_prob_from_runs(aruns, hruns)
+
+        # Existing ML factor edge becomes supporting signal, not replacement.
+        try:
+            factor_edge = _ml_factor_edge_points(af, hf)
+        except Exception:
+            factor_edge = clamp((ascore - hscore) * 0.40, -14, 14)
+        afactor_model = clamp(50.0 + factor_edge, 28.0, 72.0)
+
+        # Starting pitcher head-to-head edge adds the missing SP layer.
+        asp = _ml30_sp_strength(ap)
+        hsp = _ml30_sp_strength(hp)
+        sp_model = clamp(50.0 + ((asp - hsp) * 0.40), 30.0, 70.0)
+
+        amodel = (amodel_score * 0.56) + (afactor_model * 0.27) + (sp_model * 0.17)
+        amodel = round(float(clamp(amodel, 28.0, 72.0)), 1)
+        hmodel = round(100.0 - amodel, 1)
+
+        og = next((x for x in odds if x.get('away_abbr') == a and x.get('home_abbr') == h), None)
+        amkt = og.get('away_market') if og else None
+        hmkt = og.get('home_market') if og else None
+        market_available = amkt is not None and hmkt is not None
+
+        aedge = None if amkt is None else round(amodel - amkt, 1)
+        hedge = None if hmkt is None else round(hmodel - hmkt, 1)
+        score_pick = a if aruns >= hruns else h
+        model_pick = a if amodel >= hmodel else h
+        score_edge = abs(aruns - hruns)
+        model_gap = abs(amodel - hmodel)
+        data_label, data_note = _ml30_data_quality(af, hf, ap, hp)
+
+        if market_available:
+            pick, edge = (a, aedge) if aedge >= hedge else (h, hedge)
+            agrees_score = pick == score_pick
+            agrees_model = pick == model_pick
+            if edge >= 6.0 and score_edge >= 0.45 and agrees_score and agrees_model and data_label == 'OK':
+                status, grade = 'PLAYABLE', f'🔥 ML EDGE — {pick}'
+            elif edge >= 3.5 and score_edge >= 0.25 and agrees_model:
+                status = 'LEAN' if data_label == 'OK' else 'LEAN — REVIEW'
+                grade = f'✅ ML LEAN — {pick}'
+            else:
+                status = 'PASS' if data_label == 'OK' else 'PASS — REVIEW'
+                grade = f'🚫 PASS ML — {pick}'
+        else:
+            pick = model_pick
+            edge = round(model_gap, 1)
+            if model_gap >= 10.0 and score_edge >= 0.55 and data_label == 'OK':
+                status, grade = 'MODEL LEAN', f'✅ MODEL ML LEAN — {pick}'
+            else:
+                status, grade = 'MODEL ONLY — PASS THIN', f'🚫 PASS ML — {pick}'
+
+        conf = _ml30_confidence(edge, score_edge, data_label, market_available)
+        rows.append({
+            'Matchup': matchup,
+            'Pick': pick,
+            'ML Grade': grade,
+            'Status': status,
+            'ML Edge %': round(float(edge), 1),
+            'ML Confidence %': conf,
+            'ML Data Quality': data_label,
+            'ML Data Note': data_note,
+            'Projected Score': f'{a} {aruns:.1f} - {h} {hruns:.1f}',
+            'Away Projected Runs': round(aruns, 2),
+            'Home Projected Runs': round(hruns, 2),
+            'Score Edge': round(score_edge, 2),
+            'Score Pick': score_pick,
+            'Away Model %': amodel,
+            'Home Model %': hmodel,
+            'Away Market %': amkt,
+            'Home Market %': hmkt,
+            'Away Price': og.get('away_price') if og else None,
+            'Home Price': og.get('home_price') if og else None,
+            'Away SP': ap.get('pitcher') or ap.get('Pitcher') or '—' if isinstance(ap, dict) else '—',
+            'Home SP': hp.get('pitcher') or hp.get('Pitcher') or '—' if isinstance(hp, dict) else '—',
+            'Away SP Strength': asp,
+            'Home SP Strength': hsp,
+            'Away BaseRuns/G': af.get('BaseRuns/G'),
+            'Home BaseRuns/G': hf.get('BaseRuns/G'),
+            'Away Team wRC+': af.get('Team wRC+ Split'),
+            'Home Team wRC+': hf.get('Team wRC+ Split'),
+            'Away Lineup Strength': af.get('Lineup Strength'),
+            'Home Lineup Strength': hf.get('Lineup Strength'),
+            'Away Bullpen': af.get('Bullpen'),
+            'Home Bullpen': hf.get('Bullpen'),
+            'Away Rest': af.get('Rest'),
+            'Home Rest': hf.get('Rest'),
+            'Park': af.get('Park') or hf.get('Park'),
+            'Park Factor': af.get('Park Factor') or hf.get('Park Factor'),
+            'Away ML Factors': ml_factor_summary(af) if 'ml_factor_summary' in globals() else str(af),
+            'Home ML Factors': ml_factor_summary(hf) if 'ml_factor_summary' in globals() else str(hf),
+            'ML Version': ML_30_UPGRADE_VERSION,
+            'Source': 'ML 3.0 + Market Edge' if market_available else 'ML 3.0 Model Only',
+        })
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        # Prefer playable/lean rows first, then biggest edge.
+        order = {'PLAYABLE': 0, 'LEAN': 1, 'MODEL LEAN': 2, 'PASS': 3, 'MODEL ONLY — PASS THIN': 4}
+        df['_sort_status'] = df['Status'].astype(str).map(lambda x: order.get(x.split(' — ')[0], order.get(x, 5)))
+        df = df.sort_values(['_sort_status', 'ML Edge %'], ascending=[True, False]).drop(columns=['_sort_status'])
+    return df
+
+# Keep the existing Moneyline UI, but its data now comes from ML_30_UPGRADE_VERSION.
